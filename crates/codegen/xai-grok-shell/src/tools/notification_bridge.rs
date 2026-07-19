@@ -12,6 +12,7 @@ use xai_grok_tools::notification::types::{ToolNotification, ToolNotificationHand
 use xai_grok_tools::types::output::{BashOutput, ToolOutput};
 use xai_hunk_tracker::HunkTrackerHandle;
 
+use crate::agent::notify::{AgentNotification, Notifier};
 use crate::session::commands::SessionCommand;
 use crate::session::commands::{NotificationPriority, NotificationSource};
 use crate::session::persistence::PersistenceMsg;
@@ -96,6 +97,32 @@ pub struct NotificationBridgeConfig {
     /// written at one chokepoint — see
     /// `SessionActor::set_goal_loop_active_resource` for the rationale.
     pub goal_loop_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Optional out-of-band notifier (Web Push, etc.). Additive: in-band ACP
+    /// delivery stays on the native `gateway` path above; when set, selected
+    /// events are ALSO dispatched here so they reach clients that are not
+    /// currently attached over the WebSocket. `None` in every mode that has no
+    /// push transport wired (the default).
+    pub notifier: Option<Arc<dyn Notifier>>,
+}
+
+/// Map a fired scheduled task to an out-of-band [`AgentNotification`].
+///
+/// Pure mapping, unit-tested in isolation. In-band ACP delivery is unaffected —
+/// this only feeds the additive `notifier` sink (e.g. Web Push).
+pub(crate) fn scheduled_task_fired_notification(
+    fired: &xai_grok_tools::notification::types::ScheduledTaskFired,
+) -> AgentNotification {
+    AgentNotification {
+        kind: "scheduled_task_fired".into(),
+        title: format!("Scheduled task fired ({})", fired.human_schedule),
+        body: fired.prompt.clone(),
+        meta: serde_json::json!({
+            "taskId": fired.task_id,
+            "humanSchedule": fired.human_schedule,
+            "nextFireAt": fired.next_fire_at,
+        }),
+    }
 }
 
 /// Snapshot a shared `OnceLock` tool-name slot as a borrowed `&str`.
@@ -665,6 +692,20 @@ async fn handle_notification(
                 "Scheduled task fired, injecting prompt into session"
             );
 
+            // Additive out-of-band delivery (Web Push): fire-and-forget so a
+            // slow push transport never blocks the bridge loop. Built from
+            // `&fired` before its fields are moved into the in-band notification
+            // below. In-band ACP forwarding is unchanged.
+            if let Some(notifier) = &config.notifier {
+                let notifier = notifier.clone();
+                let ev = scheduled_task_fired_notification(&fired);
+                // Detached on purpose: fire-and-forget so a slow push transport
+                // cannot block the bridge loop. Delivery failures are handled by
+                // the push sink itself (dead subscriptions are pruned in the
+                // Web Push task).
+                let _ = tokio::spawn(async move { notifier.notify(&ev).await });
+            }
+
             let inject_payload = serde_json::json!({
                 "sessionId": config.session_id,
                 "taskId": &fired.task_id,
@@ -953,8 +994,30 @@ mod tests {
                 false,
             )),
             goal_loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            notifier: None,
         };
         (config, gateway_rx, persistence_rx, session_cmd_rx)
+    }
+
+    #[test]
+    fn scheduled_task_fired_notification_maps_fields() {
+        let fired = xai_grok_tools::notification::types::ScheduledTaskFired {
+            task_id: "abc123".into(),
+            prompt: "run the deploy check".into(),
+            human_schedule: "every 5 minutes".into(),
+            next_fire_at: Some("2026-01-01T00:00:00Z".into()),
+        };
+        let ev = scheduled_task_fired_notification(&fired);
+        assert_eq!(ev.kind, "scheduled_task_fired");
+        assert!(
+            ev.title.contains("every 5 minutes"),
+            "title should carry the human schedule, got {:?}",
+            ev.title
+        );
+        assert_eq!(ev.body, "run the deploy check");
+        assert_eq!(ev.meta["taskId"], "abc123");
+        assert_eq!(ev.meta["humanSchedule"], "every 5 minutes");
+        assert_eq!(ev.meta["nextFireAt"], "2026-01-01T00:00:00Z");
     }
 
     fn make_task_snapshot(task_id: &str, kind: TaskKind) -> TaskSnapshot {

@@ -534,6 +534,7 @@ pub(crate) async fn spawn_session_actor(
             auto_wake_enabled: tool_context.auto_wake_enabled,
             queue_exit_reminder_on_approved_exit: queue_exit_reminder_on_approved_exit.clone(),
             goal_loop_active: tool_context.goal_loop_active_gate.clone(),
+            notifier: None,
         },
     );
     let tool_context_for_handle = tool_context.clone();
