@@ -543,7 +543,7 @@ impl PagerLeaderCluster {
             leader_tx,
             leader_rx,
             cancel.clone(),
-            reconnector,
+            reconnector.map(crate::acp::leader_bridge::BridgeReconnector::Leader),
             ReconnectPolicy::unbounded(),
         )
         .expect("bridge spawn");

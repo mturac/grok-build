@@ -105,12 +105,15 @@ fn should_evict(leader_version: Option<&str>, client_version: &str) -> bool {
     leader_version.is_some_and(|v| leader_is_older_than(v, client_version))
 }
 /// Base delay between reconnection attempts.
-const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
+///
+/// `pub(crate)` so [`crate::agent::remote_client::RemoteWsReconnector`] can
+/// share the exact same backoff curve rather than drifting its own constants.
+pub(crate) const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
 /// Maximum delay between reconnection attempts (caps exponential backoff).
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+pub(crate) const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 /// Maximum reconnection attempts for bounded mode (headless/`grok -p`).
 /// TUI mode uses unlimited retries controlled by a cancellation token.
-const RECONNECT_MAX_ATTEMPTS_BOUNDED: u32 = 5;
+pub(crate) const RECONNECT_MAX_ATTEMPTS_BOUNDED: u32 = 5;
 /// Environment URLs to pass to the leader subprocess.
 /// These are resolved from the environment (--dev flag) before spawning.
 #[derive(Debug, Clone)]

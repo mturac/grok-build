@@ -26,7 +26,10 @@ pub(crate) mod update_chunk_merge;
 
 pub use mvp_agent::MvpAgent;
 pub use relay::{RelayConfig, RelayHandle, spawn_relay_connection};
-pub use remote_client::{RemoteAgentConfig, connect_remote_agent};
+pub use remote_client::{
+    REMOTE_PROTOCOL_VERSION, RemoteAgentConfig, RemoteHello, RemoteReconnectOutcome,
+    RemoteWsReconnector, connect_remote_agent,
+};
 pub use server::{ServerConfig, run_agent_server, run_agent_server_on};
 
 #[cfg(test)]

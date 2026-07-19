@@ -79,9 +79,38 @@ Notes:
 - Prefer `wss://` for anything beyond a trusted network (for example by
   terminating TLS at a reverse proxy in front of `grok agent serve`);
   standard `wss://` certificates work out of the box.
-- Sessions live on the remote host. If the connection drops, re-run
-  `grok --remote ...` and resume the session — the server keeps the agent
-  (and any in-flight prompt) alive across reconnects.
+- Sessions live on the remote host. If the connection drops (network blip,
+  laptop sleep, server restart), the TUI reconnects automatically with
+  exponential backoff — no need to re-run `grok --remote ...` by hand.
+- **Automatic reconnection and session replay.** Every server process
+  generates a random instance id at startup and sends it to each connecting
+  client in a one-time hello frame, before any ACP traffic. On reconnect the
+  client compares the new hello's instance id against the one it saw before:
+  - **Same instance id** (the server process, and its in-memory agent,
+    survived — e.g. a transient network drop): the client just resumes
+    pumping messages. Nothing is replayed.
+  - **Different instance id** (the server process restarted and its agent
+    state is gone): the client automatically replays `initialize` and
+    `session/load` for the active session before resuming, so the
+    conversation picks back up losslessly without any manual action. If the
+    replay itself fails partway through (the new connection drops again
+    before every session finishes loading), the client does not give up:
+    it re-dials and retries the reconnect-and-replay sequence rather than
+    resuming traffic against a half-restored agent.
+  - The server must actually send its hello frame promptly: if a WS
+    handshake completes but no hello arrives (for example, an old
+    `grok agent serve` build that predates the hello frame), the client
+    fails fast with an actionable error instead of hanging indefinitely.
+- **Version skew.** The hello frame also carries the server's protocol
+  version. If it doesn't match what the client expects, the connection (or
+  reconnect) fails immediately with an error telling you to update whichever
+  side — client or `grok agent serve` — is older, instead of limping along
+  with an incompatible wire format.
+- **Permanent connect failures don't retry forever.** A rejected secret (HTTP
+  401) or a protocol version mismatch is not something a retry will ever fix.
+  Reconnect attempts recognize these as permanent and give up immediately with
+  the actionable message, rather than retrying silently under exponential
+  backoff and leaving you looking at a TUI that seems stuck.
 - Agent-startup flags such as `--experimental-memory` or `--storage-mode`
   have no effect in remote mode; configure them where the server runs.
 - The server currently streams updates to one client at a time: a second
