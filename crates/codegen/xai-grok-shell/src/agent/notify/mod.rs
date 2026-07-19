@@ -1,9 +1,11 @@
 pub mod fanout;
 pub mod store;
 pub mod vapid;
+pub mod webpush;
 
 pub use fanout::FanoutNotifier;
 pub use store::{PushStore, PushSubscription};
+pub use webpush::WebPushNotifier;
 
 /// A single agent-originated notification to deliver to clients.
 #[derive(Clone, Debug)]
