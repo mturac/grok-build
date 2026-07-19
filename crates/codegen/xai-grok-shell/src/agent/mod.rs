@@ -11,6 +11,7 @@ pub(crate) mod handlers;
 pub mod init;
 pub mod models;
 pub mod mvp_agent;
+pub mod notify;
 pub(crate) mod proxy;
 pub mod relay;
 pub mod remote_client;
