@@ -393,6 +393,55 @@ pub fn resolve_use_leader(
     }
     (false, None)
 }
+/// A resolved `--remote` target: where to dial and how to authenticate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTarget {
+    pub ws_url: String,
+    pub secret: String,
+}
+
+/// Resolve `--remote` / `--remote-secret` into a [`RemoteTarget`].
+///
+/// The URL must be `ws://` or `wss://`. The secret comes from
+/// `--remote-secret` (or `GROK_AGENT_SECRET`) first, falling back to a
+/// `?server-key=` query parameter pasted from the server's startup banner.
+/// When the query parameter is the only source it is left in the URL — the
+/// server accepts either form.
+pub fn resolve_remote_target(
+    remote: Option<&str>,
+    remote_secret: Option<&str>,
+) -> anyhow::Result<Option<RemoteTarget>> {
+    let Some(raw_url) = remote else {
+        return Ok(None);
+    };
+    let url = url::Url::parse(raw_url)
+        .map_err(|e| anyhow::anyhow!("--remote: invalid WebSocket URL '{raw_url}': {e}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        anyhow::bail!(
+            "--remote: URL scheme must be ws:// or wss://, got '{}://'",
+            url.scheme()
+        );
+    }
+    let query_secret = url
+        .query_pairs()
+        .find(|(k, _)| k == "server-key")
+        .map(|(_, v)| v.into_owned());
+    let secret = remote_secret
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty())
+        .or(query_secret)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--remote requires a secret: pass --remote-secret, set \
+                 GROK_AGENT_SECRET, or include ?server-key=<secret> in the URL"
+            )
+        })?;
+    Ok(Some(RemoteTarget {
+        ws_url: raw_url.to_string(),
+        secret,
+    }))
+}
+
 /// Join early prefetch to get remote settings (with timeout).
 ///
 /// Remote settings come from the product settings API and contain `leader_mode`,
@@ -476,12 +525,16 @@ pub async fn run(
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     let prefetch_elapsed = startup_start.elapsed();
+    let remote_target =
+        resolve_remote_target(args.remote.as_deref(), args.remote_secret.as_deref())?;
+    // A remote target replaces the local agent entirely; config-driven leader
+    // mode must not activate (the --leader flag already conflicts via clap).
     let (use_leader, policy_disable_reason) = resolve_use_leader(
         args.leader,
         args.no_leader,
         &raw_config,
         remote_settings.as_ref(),
-        true,
+        remote_target.is_none(),
     );
     tracing::info!(
         use_leader,
@@ -616,7 +669,22 @@ pub async fn run(
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
     };
-    let connection = if use_leader {
+    let connection = if let Some(remote) = &remote_target {
+        let conn = crate::acp::connect_via_remote(
+            &cancel,
+            connect_flags,
+            &raw_config,
+            &remote.ws_url,
+            &remote.secret,
+        )
+        .await?;
+        tracing::info!(
+            elapsed_ms = startup_start.elapsed().as_millis() as u64,
+            ws_url = %remote.ws_url,
+            "Connected to remote agent"
+        );
+        conn
+    } else if use_leader {
         let conn = crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await?;
         tracing::info!(
             elapsed_ms = startup_start.elapsed().as_millis() as u64,
@@ -1396,6 +1464,70 @@ fn set_panic_hook(mode: ScreenMode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── resolve_remote_target ─────────────────────────────────────
+
+    #[test]
+    fn remote_target_none_without_flag() {
+        assert_eq!(resolve_remote_target(None, Some("s")).unwrap(), None);
+    }
+
+    #[test]
+    fn remote_target_uses_explicit_secret() {
+        let target = resolve_remote_target(Some("wss://host:2419/ws"), Some("tok"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.ws_url, "wss://host:2419/ws");
+        assert_eq!(target.secret, "tok");
+    }
+
+    #[test]
+    fn remote_target_falls_back_to_server_key_query() {
+        let target = resolve_remote_target(Some("ws://host:2419/ws?server-key=fromurl"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.secret, "fromurl");
+    }
+
+    #[test]
+    fn remote_target_explicit_secret_wins_over_query() {
+        let target = resolve_remote_target(
+            Some("ws://host:2419/ws?server-key=fromurl"),
+            Some("explicit"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(target.secret, "explicit");
+    }
+
+    #[test]
+    fn remote_target_empty_explicit_secret_falls_back_to_query() {
+        // GROK_AGENT_SECRET="" must not shadow a usable ?server-key=.
+        let target = resolve_remote_target(Some("ws://h/ws?server-key=q"), Some(""))
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.secret, "q");
+    }
+
+    #[test]
+    fn remote_target_requires_some_secret() {
+        let err = resolve_remote_target(Some("wss://host/ws"), None).unwrap_err();
+        assert!(err.to_string().contains("--remote-secret"), "{err}");
+    }
+
+    #[test]
+    fn remote_target_rejects_non_ws_schemes() {
+        for url in ["https://host/ws", "http://host/ws", "ftp://host"] {
+            let err = resolve_remote_target(Some(url), Some("s")).unwrap_err();
+            assert!(err.to_string().contains("ws://"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn remote_target_rejects_invalid_url() {
+        assert!(resolve_remote_target(Some("not a url"), Some("s")).is_err());
+    }
+
     #[test]
     fn restore_runs_teardown_even_when_writer_failed() {
         use ratatui::{TerminalOptions, Viewport};

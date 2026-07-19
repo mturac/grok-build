@@ -736,6 +736,23 @@ pub struct PagerArgs {
     /// Run standalone even when leader mode is configured.
     #[arg(long, conflicts_with = "leader", hide = true)]
     pub no_leader: bool,
+    /// Connect to a remote `grok agent serve` instance instead of running a
+    /// local agent, e.g. `--remote wss://host:2419/ws`. The secret comes from
+    /// --remote-secret, GROK_AGENT_SECRET, or a `?server-key=` URL parameter.
+    #[arg(
+        long = "remote",
+        value_name = "WS_URL",
+        conflicts_with_all = ["leader", "no_leader"]
+    )]
+    pub remote: Option<String>,
+    /// Secret token for --remote, matching the server's `--secret`.
+    #[arg(
+        long = "remote-secret",
+        value_name = "SECRET",
+        env = "GROK_AGENT_SECRET",
+        hide_env_values = true
+    )]
+    pub remote_secret: Option<String>,
     /// Initial prompt for the interactive session, e.g. `grok "fix the bug"` or `grok --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",
