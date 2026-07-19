@@ -1,4 +1,5 @@
 pub mod fanout;
+pub mod vapid;
 
 pub use fanout::FanoutNotifier;
 

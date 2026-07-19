@@ -110,6 +110,10 @@ moka = { workspace = true, features = ["future"] }
 dhat = { workspace = true, optional = true }
 base64 = { workspace = true }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# Pinned to the exact version jsonwebtoken's rust_crypto backend already
+# resolves in Cargo.lock — promoting it to a direct dep (for VAPID keygen)
+# adds no new crate to the workspace.
+p256 = { version = "0.13.2", features = ["ecdsa", "pkcs8"] }
 sha2 = { workspace = true }
 rand = { workspace = true }
 shlex = { workspace = true }
