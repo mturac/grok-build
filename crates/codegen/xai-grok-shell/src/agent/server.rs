@@ -42,6 +42,8 @@ use xai_acp_lib::{
 use crate::agent::config::{Config as AgentConfig, ModelEntry};
 use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
 use crate::agent::mvp_agent::MvpAgent;
+use crate::agent::remote_client::REMOTE_PROTOCOL_VERSION;
+use crate::agent::webui;
 
 use indexmap::IndexMap;
 
@@ -69,6 +71,12 @@ pub struct ServerConfig {
 struct ServerState {
     agent_config: AgentConfig,
     secret: String,
+    /// Generated once per server process at startup (see [`run_agent_server_on`]).
+    /// Sent to every connecting client in the hello frame so it can tell
+    /// whether a reconnect landed on the same agent process (same id, no ACP
+    /// replay needed) or a restarted one (different id, `MvpAgent` and every
+    /// session gone — full replay required).
+    instance_id: String,
     /// Channel to send new WebSocket connections to the persistent agent thread.
     /// Lazily initialised on first connection; protected by a tokio Mutex so the
     /// axum handler (which is `Send`) can acquire it.
@@ -151,6 +159,26 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
     info!("New WebSocket connection from {}", peer_addr);
 
     let (mut ws_write, mut ws_read) = ws.split();
+
+    // Hello frame FIRST, before any ACP traffic: lets the client learn the
+    // server's protocol version (fail fast on skew) and instance id (decide
+    // whether a reconnect needs to replay ACP state). The remote client
+    // (`connect_remote_agent`) consumes exactly this frame before handing its
+    // channels to the caller.
+    let hello = serde_json::json!({
+        "type": "hello",
+        "agent_instance_id": state.instance_id,
+        "protocol_version": REMOTE_PROTOCOL_VERSION,
+        "binary_version": xai_grok_version::VERSION,
+    });
+    if ws_write
+        .send(Message::Text(hello.to_string().into()))
+        .await
+        .is_err()
+    {
+        warn!("Failed to send hello frame to {}", peer_addr);
+        return;
+    }
 
     // Channels for bridging WS <-> Agent thread
     let (to_agent_tx, to_agent_rx) = mpsc::unbounded_channel::<String>();
@@ -487,19 +515,36 @@ pub async fn run_agent_server_on(
     agent_config: AgentConfig,
 ) -> anyhow::Result<()> {
     let bind_addr = listener.local_addr()?;
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    info!(agent_instance_id = %instance_id, "generated agent instance id for this server process");
     let state = Arc::new(ServerState {
         agent_config,
         secret,
+        instance_id,
         agent_conn_tx: tokio::sync::Mutex::new(None),
     });
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        // Mobile/browser PWA chat client shell. No auth on these routes —
+        // the shell carries no secrets; `/ws` above still enforces the
+        // server's secret via `validate_auth`. See `webui` module docs.
+        .route("/", get(webui::index))
+        .route("/app.js", get(webui::app_js))
+        .route("/style.css", get(webui::style_css))
+        .route("/manifest.webmanifest", get(webui::manifest))
+        .route("/sw.js", get(webui::service_worker))
+        .route("/icon.svg", get(webui::icon_svg))
         .with_state(state);
 
     info!("Agent server listening on ws://{}/ws", bind_addr);
     info!(
         "Clients should connect with: --remote ws://{}:{}/ws --remote-secret <token>",
+        bind_addr.ip(),
+        bind_addr.port()
+    );
+    info!(
+        "Or open the mobile web client: http://{}:{}/",
         bind_addr.ip(),
         bind_addr.port()
     );

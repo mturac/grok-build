@@ -6,6 +6,7 @@
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
+pub mod replay;
 pub mod spawn;
 pub mod tracker;
 
@@ -374,10 +375,13 @@ pub async fn connect_via_leader(
 /// authenticate sequence. Auth (`session/new` model credentials, tool
 /// execution, session persistence) all happen on the remote host.
 ///
-/// v1 has no automatic reconnect: when the socket drops, the bridge's cancel
-/// token fires and the pager exits. Re-running `grok --remote ...` and loading
-/// the session resumes losslessly — the server keeps the agent alive across
-/// connections.
+/// Auto-reconnect: when the socket drops, `RemoteWsReconnector` re-dials with
+/// unbounded retries (matching the leader-mode TUI's persistence — the same
+/// policy `connect_via_leader` uses). A reconnect that lands on the same
+/// server process (`agent_instance_id` unchanged) just resumes pumping; one
+/// that lands on a restarted process (`agent_instance_id` changed, the
+/// `MvpAgent` and every session are gone) replays cached `initialize` +
+/// `session/load` before resuming — see `leader_bridge::bridge_channels`.
 pub async fn connect_via_remote(
     cancel: &CancellationToken,
     flags: ConnectFlags,
@@ -403,23 +407,24 @@ pub async fn connect_via_remote(
     // resolve_telemetry_mode reads remote_settings.
     agent_config.remote_settings = flags.remote_settings.clone();
 
-    let (remote_tx, remote_rx) = xai_grok_shell::agent::connect_remote_agent(
-        xai_grok_shell::agent::RemoteAgentConfig {
-            ws_url: ws_url.to_string(),
-            secret: secret.to_string(),
-        },
-        cancel.clone(),
-    )
-    .await?;
+    let remote_config = xai_grok_shell::agent::RemoteAgentConfig {
+        ws_url: ws_url.to_string(),
+        secret: secret.to_string(),
+    };
+    let (hello, remote_tx, remote_rx) =
+        xai_grok_shell::agent::connect_remote_agent(remote_config.clone(), cancel.clone()).await?;
 
-    // No reconnector: on WS drop the bridge fires the cancel token and the
-    // caller observes a disconnect (manual reattach in v1).
+    let reconnector = xai_grok_shell::agent::RemoteWsReconnector::new(
+        remote_config,
+        hello.agent_instance_id.clone(),
+    );
+
     let bridge = leader_bridge::bridge_channels(
         remote_tx,
         remote_rx,
         cancel.clone(),
-        None,
-        ReconnectPolicy::bounded(),
+        Some(leader_bridge::BridgeReconnector::RemoteWs(reconnector)),
+        ReconnectPolicy::unbounded(),
     )?;
     let (tx, rx) = (bridge.channel.tx, bridge.channel.rx);
 

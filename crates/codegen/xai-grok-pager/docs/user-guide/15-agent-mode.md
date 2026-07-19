@@ -79,13 +79,111 @@ Notes:
 - Prefer `wss://` for anything beyond a trusted network (for example by
   terminating TLS at a reverse proxy in front of `grok agent serve`);
   standard `wss://` certificates work out of the box.
-- Sessions live on the remote host. If the connection drops, re-run
-  `grok --remote ...` and resume the session — the server keeps the agent
-  (and any in-flight prompt) alive across reconnects.
+- Sessions live on the remote host. If the connection drops (network blip,
+  laptop sleep, server restart), the TUI reconnects automatically with
+  exponential backoff — no need to re-run `grok --remote ...` by hand.
+- **Automatic reconnection and session replay.** Every server process
+  generates a random instance id at startup and sends it to each connecting
+  client in a one-time hello frame, before any ACP traffic. On reconnect the
+  client compares the new hello's instance id against the one it saw before:
+  - **Same instance id** (the server process, and its in-memory agent,
+    survived — e.g. a transient network drop): the client just resumes
+    pumping messages. Nothing is replayed.
+  - **Different instance id** (the server process restarted and its agent
+    state is gone): the client automatically replays `initialize` and
+    `session/load` for the active session before resuming, so the
+    conversation picks back up losslessly without any manual action. If the
+    replay itself fails partway through (the new connection drops again
+    before every session finishes loading), the client does not give up:
+    it re-dials and retries the reconnect-and-replay sequence rather than
+    resuming traffic against a half-restored agent.
+  - The server must actually send its hello frame promptly: if a WS
+    handshake completes but no hello arrives (for example, an old
+    `grok agent serve` build that predates the hello frame), the client
+    fails fast with an actionable error instead of hanging indefinitely.
+- **Version skew.** The hello frame also carries the server's protocol
+  version. If it doesn't match what the client expects, the connection (or
+  reconnect) fails immediately with an error telling you to update whichever
+  side — client or `grok agent serve` — is older, instead of limping along
+  with an incompatible wire format.
+- **Permanent connect failures don't retry forever.** A rejected secret (HTTP
+  401) or a protocol version mismatch is not something a retry will ever fix.
+  Reconnect attempts recognize these as permanent and give up immediately with
+  the actionable message, rather than retrying silently under exponential
+  backoff and leaving you looking at a TUI that seems stuck.
 - Agent-startup flags such as `--experimental-memory` or `--storage-mode`
   have no effect in remote mode; configure them where the server runs.
 - The server currently streams updates to one client at a time: a second
   connection takes over the update stream from the first.
+
+---
+
+## Mobile / browser client (PWA)
+
+`grok agent serve` also serves a self-contained mobile chat UI directly from
+the same process — no separate build step, no external requests, and it
+works fully offline once the shell is cached. Open it from a phone or any
+browser:
+
+```bash
+grok agent serve --bind 0.0.0.0:2419 --secret <token>
+```
+
+```
+http://<host>:2419/
+```
+
+On first load, the page asks for the server key (the same `--secret` /
+`GROK_AGENT_SECRET` value the TUI's `--remote-secret` uses). You can also
+paste a link with the key pre-filled:
+
+```
+http://<host>:2419/?server-key=<token>
+```
+
+The key is stored in the browser's `localStorage` after you connect once, so
+you won't be asked again on that device. The browser WebSocket API cannot set
+an `Authorization` header, so the page connects with `?server-key=<token>` on
+the `/ws` URL — the same query-parameter fallback the server already accepts
+for the TUI's `--remote-secret`.
+
+### What it does
+
+- Speaks the same ACP JSON-RPC protocol as the TUI and IDE clients:
+  `initialize` -> `session/new` (or `session/load` to resume) ->
+  `session/prompt`, rendering `session/update` notifications as they stream
+  in (agent text, dimmed "thinking" text, and compact tool-call lines).
+- Renders `session/request_permission` prompts as inline buttons; the input
+  box stays disabled until you pick an option.
+- Remembers your last session id (in `localStorage`) and offers "Resume last
+  session" vs. "Start a new session" the next time you open the page.
+- Reconnects automatically with capped exponential backoff on a dropped
+  connection, replaying `initialize` + `session/load` so the conversation
+  picks back up without you doing anything.
+
+### Install to your home screen
+
+The page ships a web app manifest and a small service worker that
+cache-first-serves the six static shell files (HTML/CSS/JS/manifest/service
+worker/icon), so the shell itself loads even with no network. On Android
+Chrome, use "Add to Home Screen"; on iOS Safari, use the Share sheet's "Add
+to Home Screen". Either way you get a standalone, full-screen app icon — the
+live chat itself still needs a WebSocket connection to the server, only the
+shell is offline-capable.
+
+### Caveats
+
+- **Single active client.** Just like the TUI's `--remote` mode, the agent
+  process only streams updates to one connected client at a time — if you
+  open the page on a second device (or a second tab) while the first is
+  connected, the new connection takes over the update stream from the first.
+- **TLS.** The page connects with plain `ws://` unless you load it over
+  `https://`, in which case it automatically upgrades to `wss://`. As with
+  the TUI, `grok agent serve` doesn't terminate TLS itself — put a reverse
+  proxy in front of it for anything beyond a trusted local network.
+- **No filesystem/terminal capabilities.** The web client advertises
+  `fs: { readTextFile: false, writeTextFile: false }` and `terminal: false`
+  in its `initialize` call, matching a browser's actual capabilities.
 
 ---
 

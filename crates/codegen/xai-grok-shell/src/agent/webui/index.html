@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <title>Grok Remote</title>
+    <meta name="description" content="Mobile chat client for a remote grok agent serve instance." />
+    <meta name="theme-color" content="#0b0d12" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Grok Remote" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="header">
+        <span id="status-dot" class="dot dot-disconnected"></span>
+        <div class="header-text">
+          <div id="session-label">Grok Remote</div>
+          <div id="status-label">Not connected</div>
+        </div>
+        <div class="header-menu">
+          <button id="menu-btn" aria-label="Session menu" type="button">&#8942;</button>
+          <div id="menu-dropdown" class="dropdown hidden">
+            <button id="menu-new-session" type="button">New session</button>
+            <button id="menu-change-key" type="button">Change server key</button>
+          </div>
+        </div>
+      </header>
+
+      <div id="version-warning" class="banner hidden"></div>
+
+      <main id="messages"></main>
+
+      <div id="permission-panel" class="hidden"></div>
+
+      <footer id="composer">
+        <textarea
+          id="input"
+          rows="1"
+          placeholder="Connecting…"
+          disabled
+          autocomplete="off"
+          autocapitalize="sentences"
+        ></textarea>
+        <button id="send-btn" type="button" disabled>Send</button>
+      </footer>
+    </div>
+
+    <div id="connect-overlay" class="overlay">
+      <h1>Grok Remote</h1>
+      <p>
+        Enter the server key printed when you ran
+        <code>grok agent serve</code> on the host you want to control.
+      </p>
+      <input
+        id="secret-input"
+        type="password"
+        placeholder="Server key"
+        autocomplete="off"
+        autocapitalize="none"
+        autocorrect="off"
+        spellcheck="false"
+      />
+      <button id="connect-btn" type="button">Connect</button>
+      <p id="connect-error" class="error hidden"></p>
+    </div>
+
+    <div id="chooser-overlay" class="overlay hidden">
+      <h1>Welcome back</h1>
+      <p>You have a previous session saved on this device.</p>
+      <button id="resume-btn" type="button">Resume last session</button>
+      <button id="new-session-btn" type="button" class="secondary">Start a new session</button>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

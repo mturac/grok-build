@@ -3,12 +3,16 @@
 //! `grok --remote` transport).
 //!
 //! Structured as a single `#[test]` so the process environment can be set up
-//! before any runtime threads exist (edition-2024 `set_var` safety), then
-//! both scenarios run sequentially against one server:
+//! before any runtime threads exist (edition-2024 `set_var` safety), then all
+//! scenarios run sequentially against one server:
 //!
 //! 1. A wrong secret is rejected at the WebSocket handshake (HTTP 401).
-//! 2. A correct secret connects and completes an ACP `initialize` JSON-RPC
-//!    round trip through the WS transport to the persistent `MvpAgent`.
+//! 2. A correct secret connects, reads the server's hello frame, and
+//!    completes an ACP `initialize` JSON-RPC round trip through the WS
+//!    transport to the persistent `MvpAgent`.
+//! 3. Reconnecting to the SAME server process yields the SAME
+//!    `agent_instance_id` and `RemoteWsReconnector` reports no replay is
+//!    needed.
 
 use std::time::Duration;
 
@@ -17,7 +21,10 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use xai_grok_shell::agent::config::Config as AgentConfig;
-use xai_grok_shell::agent::{RemoteAgentConfig, connect_remote_agent, run_agent_server_on};
+use xai_grok_shell::agent::{
+    RemoteAgentConfig, RemoteWsReconnector, connect_remote_agent, run_agent_server_on,
+};
+use xai_grok_shell::leader::ReconnectPolicy;
 
 const SECRET: &str = "e2e-test-secret";
 
@@ -56,7 +63,8 @@ fn remote_agent_server_round_trip() {
         let ws_url = format!("ws://{addr}/ws");
 
         wrong_secret_is_rejected(&ws_url).await;
-        initialize_round_trip(&ws_url).await;
+        let first_instance_id = initialize_round_trip(&ws_url).await;
+        reconnect_same_server_needs_no_replay(&ws_url, &first_instance_id).await;
     });
 }
 
@@ -83,11 +91,13 @@ async fn wrong_secret_is_rejected(ws_url: &str) {
     );
 }
 
-/// The full client path: dial, authenticate, send an ACP `initialize`
-/// JSON-RPC request as a text frame, and get the agent's response back.
-async fn initialize_round_trip(ws_url: &str) {
+/// The full client path: dial, authenticate, read the hello frame, send an
+/// ACP `initialize` JSON-RPC request as a text frame, and get the agent's
+/// response back. Returns the hello's `agent_instance_id` for the caller to
+/// compare against a later reconnect.
+async fn initialize_round_trip(ws_url: &str) -> String {
     let cancel = CancellationToken::new();
-    let (tx, mut rx) = tokio::time::timeout(
+    let (hello, tx, mut rx) = tokio::time::timeout(
         Duration::from_secs(30),
         connect_remote_agent(
             RemoteAgentConfig {
@@ -100,6 +110,16 @@ async fn initialize_round_trip(ws_url: &str) {
     .await
     .expect("connect timed out")
     .expect("connect with correct secret");
+
+    assert!(
+        !hello.agent_instance_id.is_empty(),
+        "hello must carry a non-empty agent_instance_id"
+    );
+    assert_eq!(hello.protocol_version, xai_grok_shell::agent::REMOTE_PROTOCOL_VERSION);
+    assert!(
+        !hello.binary_version.is_empty(),
+        "hello must carry the server's binary_version"
+    );
 
     let params = serde_json::to_value(
         acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
@@ -140,6 +160,39 @@ async fn initialize_round_trip(ws_url: &str) {
     assert!(
         result.get("protocolVersion").is_some(),
         "initialize result missing protocolVersion: {result}"
+    );
+
+    cancel.cancel();
+    hello.agent_instance_id
+}
+
+/// The server process didn't restart between connections, so a reconnect via
+/// `RemoteWsReconnector` must observe the SAME `agent_instance_id` and report
+/// `needs_replay = false` — no `initialize`/`session/load` replay, just
+/// resume pumping (the persistent `MvpAgent` never went away).
+async fn reconnect_same_server_needs_no_replay(ws_url: &str, first_instance_id: &str) {
+    let config = RemoteAgentConfig {
+        ws_url: ws_url.to_string(),
+        secret: SECRET.to_string(),
+    };
+    let reconnector = RemoteWsReconnector::new(config, first_instance_id.to_string());
+    let cancel = CancellationToken::new();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        reconnector.reconnect(ReconnectPolicy::bounded(), &cancel),
+    )
+    .await
+    .expect("reconnect timed out")
+    .expect("reconnect to the still-running server must succeed");
+
+    assert_eq!(
+        outcome.hello.agent_instance_id, first_instance_id,
+        "the server process did not restart; the instance id must be identical"
+    );
+    assert!(
+        !outcome.needs_replay,
+        "same agent_instance_id must not require an ACP replay"
     );
 
     cancel.cancel();

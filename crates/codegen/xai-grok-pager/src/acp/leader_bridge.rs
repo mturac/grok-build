@@ -18,7 +18,10 @@ use xai_acp_lib::{
     AcpClientChannel, AcpGatewayReceiver, AcpGatewaySender, LineBufferedRead, acp_channels,
 };
 pub use xai_grok_shell::leader::ConnectionStatus;
+use xai_grok_shell::agent::RemoteWsReconnector;
 use xai_grok_shell::leader::{LeaderConnection, LeaderReconnector, ReconnectPolicy};
+
+use crate::acp::replay;
 
 const MAX_BUF: usize = 8 * 1024 * 1024;
 
@@ -26,6 +29,119 @@ pub struct LeaderBridge {
     pub channel: AcpClientChannel,
     pub cancel: CancellationToken,
     pub thread_handle: thread::JoinHandle<Result<()>>,
+}
+
+/// Outcome of one successful reconnect attempt, normalized across transports
+/// for `bridge_channels`'s reader task.
+struct ReconnectedChannels {
+    tx: mpsc::UnboundedSender<String>,
+    rx: mpsc::UnboundedReceiver<String>,
+    /// Whether the caller must replay `initialize` + `session/load` before
+    /// resuming normal pumping.
+    ///
+    /// Always `false` for the leader transport: the TUI already replays a
+    /// leader reconnect at the application layer, keyed off
+    /// `ConnectionStatus` generations (see `event_loop.rs`), so
+    /// `bridge_channels` doing it too would double-replay. `true` for a
+    /// remote WS reconnect that landed on a different `agent_instance_id`
+    /// (the server process — and its `MvpAgent` — was replaced).
+    needs_replay: bool,
+    /// The `agent_instance_id` observed on this reconnect, for the remote
+    /// transport only (`None` for the leader transport, which has no
+    /// instance-id concept). Passed to
+    /// [`BridgeReconnector::confirm_instance`] once replay has actually
+    /// succeeded — see that method's docs.
+    instance_id: Option<String>,
+}
+
+/// Abstracts the two live reconnect strategies `bridge_channels` supports, so
+/// one generic reconnect loop drives both the leader IPC transport and the
+/// remote WebSocket transport.
+pub(crate) enum BridgeReconnector {
+    Leader(LeaderReconnector),
+    RemoteWs(RemoteWsReconnector),
+}
+
+impl BridgeReconnector {
+    async fn reconnect(
+        &self,
+        policy: ReconnectPolicy,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<ReconnectedChannels> {
+        match self {
+            Self::Leader(r) => {
+                let (tx, rx, _disconnect_rx) = r.reconnect(policy, cancel).await?;
+                Ok(ReconnectedChannels {
+                    tx,
+                    rx,
+                    needs_replay: false,
+                    instance_id: None,
+                })
+            }
+            Self::RemoteWs(r) => {
+                let outcome = r.reconnect(policy, cancel).await?;
+                Ok(ReconnectedChannels {
+                    tx: outcome.tx,
+                    rx: outcome.rx,
+                    needs_replay: outcome.needs_replay,
+                    instance_id: Some(outcome.hello.agent_instance_id),
+                })
+            }
+        }
+    }
+
+    /// Deliberately NOT called before the caller installs the fresh channels
+    /// — see `LeaderReconnector::notify_connected`. No-op for the remote
+    /// transport, which has no connection-status observers today.
+    fn notify_connected(&self) {
+        match self {
+            Self::Leader(r) => r.notify_connected(),
+            Self::RemoteWs(_) => {}
+        }
+    }
+
+    /// Commit `instance_id` as the remote reconnector's new baseline for its
+    /// NEXT `reconnect`'s `needs_replay` comparison. Call this ONLY after a
+    /// `needs_replay` reconnect's replay has actually succeeded (or wasn't
+    /// needed) — see `RemoteWsReconnector::reconnect`'s docs on why confirming
+    /// too early strands the client sessionless on a failed mid-replay
+    /// reconnect. No-op for the leader transport (`instance_id` is always
+    /// `None` there).
+    async fn confirm_instance(&self, instance_id: Option<&str>) {
+        if let (Self::RemoteWs(r), Some(id)) = (self, instance_id) {
+            r.confirm_instance(id).await;
+        }
+    }
+
+    /// Whether `bridge_channels` must track outgoing `initialize` /
+    /// `session/load` requests so they can be replayed on this
+    /// reconnector's signal. Only the remote transport can report
+    /// `needs_replay`; tracking it for the leader transport would be pure
+    /// overhead since it's never acted on there.
+    fn wants_replay_state(&self) -> bool {
+        matches!(self, Self::RemoteWs(_))
+    }
+}
+
+/// Cache one outgoing line for replay, when tracking is enabled.
+///
+/// Unconditional (no per-method prefilter) when `track_replay_state`:
+/// `cache_outgoing_acp_state`'s own method match already no-ops on anything
+/// irrelevant, and outgoing volume is tiny (user-initiated requests), so a
+/// prefilter here buys nothing. A prior version gated this on
+/// `pending.contains("\"session/close\"")` and friends, which could NEVER
+/// match the real wire methods `x.ai/session/close` / `_x.ai/session/close`
+/// (the byte before `session/close` on the wire is `/`, not `"`) — closed
+/// sessions were silently never evicted from the replay cache and got
+/// resurrected by the next replay.
+fn cache_outgoing_if_tracking(
+    track_replay_state: bool,
+    pending: &str,
+    state: &std::sync::Mutex<replay::ReplayState>,
+) {
+    if track_replay_state {
+        replay::cache_outgoing_acp_state(pending, state);
+    }
 }
 
 /// How [`forward_outbound_line`] resolved one outbound line.
@@ -94,25 +210,42 @@ pub fn bridge_leader_connection(
     policy: ReconnectPolicy,
 ) -> Result<LeaderBridge> {
     let (leader_tx, leader_rx) = conn.into_channels();
-    bridge_channels(leader_tx, leader_rx, cancel, reconnector, policy)
+    bridge_channels(
+        leader_tx,
+        leader_rx,
+        cancel,
+        reconnector.map(BridgeReconnector::Leader),
+        policy,
+    )
 }
 
 /// Bridge raw IPC channels into an `AcpClientChannel`.
 ///
 /// Spawns a dedicated thread with a `LocalSet` because `ClientSideConnection`
-/// uses `spawn_local` internally. On leader disconnect, reconnects via
-/// `reconnector` (if provided) or fires the cancel token.
+/// uses `spawn_local` internally. On disconnect, reconnects via `reconnector`
+/// (if provided) or fires the cancel token. When `reconnector` reports
+/// `needs_replay` on a successful reconnect, replays cached `initialize` +
+/// `session/load` requests into the incoming pipe before resuming normal
+/// pumping (see `crate::acp::replay`).
 pub(crate) fn bridge_channels(
     leader_tx: mpsc::UnboundedSender<String>,
     leader_rx: mpsc::UnboundedReceiver<String>,
     cancel: CancellationToken,
-    reconnector: Option<LeaderReconnector>,
+    reconnector: Option<BridgeReconnector>,
     policy: ReconnectPolicy,
 ) -> Result<LeaderBridge> {
     let (client_channel, agent_channel) = acp_channels();
 
     let (incoming_read, incoming_write) = simplex(MAX_BUF);
     let (outgoing_read, outgoing_write) = simplex(MAX_BUF);
+
+    // Only the remote transport can ever signal `needs_replay`; tracking
+    // outgoing/incoming ACP state for the leader transport would be dead
+    // weight (see `BridgeReconnector::wants_replay_state`).
+    let track_replay_state = reconnector
+        .as_ref()
+        .is_some_and(BridgeReconnector::wants_replay_state);
+    let replay_state = Arc::new(std::sync::Mutex::new(replay::ReplayState::default()));
 
     let bridge_cancel = cancel.clone();
     let thread_handle = thread::Builder::new()
@@ -128,46 +261,136 @@ pub(crate) fn bridge_channels(
                 // Reader: leader IPC -> incoming simplex pipe -> ClientSideConnection
                 let cancel_r = bridge_cancel.clone();
                 let leader_tx_for_reader = leader_tx_shared.clone();
+                let replay_state_for_reader = replay_state.clone();
                 let reader_task = tokio::task::spawn_local(async move {
                     let mut incoming_write = incoming_write;
                     let mut leader_rx = leader_rx;
-                    loop {
+                    'reader: loop {
                         tokio::select! {
                             biased;
-                            _ = cancel_r.cancelled() => break,
+                            _ = cancel_r.cancelled() => break 'reader,
                             msg = leader_rx.recv() => {
                                 match msg {
                                     Some(json_line) => {
+                                        if track_replay_state
+                                            && (json_line.contains("\"sessionId\"")
+                                                || json_line.contains("\"session_id\""))
+                                        {
+                                            replay::cache_incoming_session_id(
+                                                &json_line,
+                                                &replay_state_for_reader,
+                                            );
+                                        }
                                         if incoming_write.write_all(json_line.as_bytes()).await.is_err()
                                             || incoming_write.write_all(b"\n").await.is_err()
                                         {
-                                            break;
+                                            break 'reader;
                                         }
                                     }
                                     None => {
                                         tracing::warn!("Leader connection closed");
 
-                                        if let Some(ref reconnector) = reconnector {
+                                        let Some(ref reconnector) = reconnector else {
+                                            cancel_r.cancel();
+                                            break 'reader;
+                                        };
+
+                                        // Retry reconnect+replay here, without
+                                        // returning to the outer `leader_rx.recv()`
+                                        // select in between: a failed replay must
+                                        // re-dial immediately rather than pumping
+                                        // whatever the half-replayed connection
+                                        // happens to produce next.
+                                        loop {
                                             tracing::info!("Attempting to reconnect to leader...");
                                             match reconnector.reconnect(policy, &cancel_r).await {
-                                                Ok((new_tx, new_rx, _disconnect_rx)) => {
+                                                Ok(ReconnectedChannels {
+                                                    tx: new_tx,
+                                                    rx: new_rx,
+                                                    needs_replay,
+                                                    instance_id,
+                                                }) => {
                                                     tracing::info!("Reconnected to leader IPC");
                                                     leader_rx = new_rx;
-                                                    *leader_tx_for_reader.lock().await = new_tx;
+
+                                                    // Hold the tx guard across the
+                                                    // ENTIRE replay window, not just
+                                                    // the swap: `forward_outbound_line`
+                                                    // locks this same mutex before
+                                                    // every outbound send, so
+                                                    // releasing it between the swap
+                                                    // and the replay would let a
+                                                    // queued (or brand-new) client
+                                                    // request reach the restarted
+                                                    // peer mid-replay, ahead of (or
+                                                    // interleaved with) the state
+                                                    // replay is reconstructing.
+                                                    let mut tx_guard = leader_tx_for_reader.lock().await;
+                                                    *tx_guard = new_tx;
+
+                                                    let mut replay_failed = false;
+                                                    if needs_replay {
+                                                        tracing::info!(
+                                                            "peer restarted (new agent instance) — replaying ACP state"
+                                                        );
+                                                        let state_snapshot = replay_state_for_reader
+                                                            .lock()
+                                                            .unwrap_or_else(|e| e.into_inner())
+                                                            .clone();
+                                                        let had_state = state_snapshot.has_state_to_replay();
+                                                        match replay::replay_acp_state_after_reconnect(
+                                                            &tx_guard,
+                                                            &mut leader_rx,
+                                                            &mut incoming_write,
+                                                            &state_snapshot,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Some(sid) => {
+                                                                tracing::info!(
+                                                                    session_id = %sid,
+                                                                    "replay succeeded; ACP state restored after reconnect"
+                                                                );
+                                                            }
+                                                            None if !had_state => {
+                                                                // Nothing was cached to replay
+                                                                // (e.g. reconnect before any
+                                                                // `initialize`) — benign, not a
+                                                                // failure.
+                                                            }
+                                                            None => {
+                                                                tracing::warn!(
+                                                                    "replay failed after reconnect; re-dialing to retry"
+                                                                );
+                                                                replay_failed = true;
+                                                            }
+                                                        }
+                                                    }
+                                                    drop(tx_guard);
+
+                                                    if replay_failed {
+                                                        // Do NOT confirm the instance id: the
+                                                        // next reconnect attempt must still
+                                                        // observe the stale baseline so it
+                                                        // reports `needs_replay = true` again
+                                                        // and retries the replay, instead of
+                                                        // silently stranding the client
+                                                        // sessionless.
+                                                        continue;
+                                                    }
+
+                                                    reconnector.confirm_instance(instance_id.as_deref()).await;
                                                     // Swap first, notify second — see
                                                     // `LeaderReconnector::notify_connected`.
                                                     reconnector.notify_connected();
-                                                    continue;
+                                                    continue 'reader;
                                                 }
                                                 Err(e) => {
                                                     tracing::error!(error = %e, "Failed to reconnect to leader");
                                                     cancel_r.cancel();
-                                                    break;
+                                                    break 'reader;
                                                 }
                                             }
-                                        } else {
-                                            cancel_r.cancel();
-                                            break;
                                         }
                                     }
                                 }
@@ -179,6 +402,7 @@ pub(crate) fn bridge_channels(
                 // Writer: ClientSideConnection -> outgoing simplex pipe -> leader IPC
                 let cancel_w = bridge_cancel.clone();
                 let leader_tx_for_writer = leader_tx_shared;
+                let replay_state_for_writer = replay_state;
                 let writer_task = tokio::task::spawn_local(async move {
                     let mut reader = BufReader::new(outgoing_read);
                     let mut line = String::new();
@@ -195,6 +419,11 @@ pub(crate) fn bridge_channels(
                                         if pending.is_empty() {
                                             continue;
                                         }
+                                        cache_outgoing_if_tracking(
+                                            track_replay_state,
+                                            pending,
+                                            &replay_state_for_writer,
+                                        );
                                         match forward_outbound_line(
                                             &leader_tx_for_writer,
                                             &cancel_w,
@@ -270,6 +499,56 @@ pub(crate) fn bridge_channels(
 mod tests {
     use super::*;
     use xai_acp_lib::acp_send;
+
+    /// Regression test for the writer's outgoing-cache gate: a realistic
+    /// wire-format `x.ai/session/close` line (as the writer task actually
+    /// reads it off the outgoing pipe) must evict the session from the
+    /// replay cache. Exercises `cache_outgoing_if_tracking` — the exact
+    /// function the writer task calls for every outbound line — not
+    /// `replay::cache_outgoing_acp_state` directly: the bug this guards
+    /// against was in the (now-deleted) `contains("\"session/close\"")`
+    /// prefilter that used to gate that call, which could never match the
+    /// real wire method (`x.ai/session/close` — the byte before
+    /// `session/close` is `/`, not `"`), so prior direct-call unit tests of
+    /// `cache_outgoing_acp_state` never caught it.
+    #[test]
+    fn cache_outgoing_if_tracking_evicts_closed_session_via_writer_gate() {
+        let state = std::sync::Mutex::new(replay::ReplayState::default());
+        replay::cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            &state,
+        );
+        replay::cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"A","cwd":"/tmp"}}"#,
+            &state,
+        );
+
+        let close_line =
+            r#"{"jsonrpc":"2.0","id":5,"method":"x.ai/session/close","params":{"sessionId":"A"}}"#;
+        cache_outgoing_if_tracking(true, close_line, &state);
+
+        // The session is gone, but `initialize` is still cached — confirms
+        // eviction was scoped to the session, not a wholesale reset.
+        assert!(
+            !state.lock().unwrap().contains_session("A"),
+            "session/close on the writer path must evict the closed session"
+        );
+        assert!(state.lock().unwrap().has_state_to_replay());
+    }
+
+    /// The gate must be a strict no-op when tracking is disabled (leader
+    /// transport, which never signals `needs_replay`) — no wasted parsing,
+    /// and definitely no caching.
+    #[test]
+    fn cache_outgoing_if_tracking_is_noop_when_disabled() {
+        let state = std::sync::Mutex::new(replay::ReplayState::default());
+        cache_outgoing_if_tracking(
+            false,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            &state,
+        );
+        assert!(!state.lock().unwrap().has_state_to_replay());
+    }
 
     #[tokio::test]
     async fn forward_outbound_line_delivers_on_live_channel() {
