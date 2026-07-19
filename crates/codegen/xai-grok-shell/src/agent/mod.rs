@@ -23,6 +23,7 @@ pub mod session_registry_client;
 pub(crate) mod subagent;
 pub(crate) mod subscription_check;
 pub(crate) mod update_chunk_merge;
+pub mod webui;
 
 pub use mvp_agent::MvpAgent;
 pub use relay::{RelayConfig, RelayHandle, spawn_relay_connection};

@@ -43,6 +43,7 @@ use crate::agent::config::{Config as AgentConfig, ModelEntry};
 use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
 use crate::agent::mvp_agent::MvpAgent;
 use crate::agent::remote_client::REMOTE_PROTOCOL_VERSION;
+use crate::agent::webui;
 
 use indexmap::IndexMap;
 
@@ -525,11 +526,25 @@ pub async fn run_agent_server_on(
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        // Mobile/browser PWA chat client shell. No auth on these routes —
+        // the shell carries no secrets; `/ws` above still enforces the
+        // server's secret via `validate_auth`. See `webui` module docs.
+        .route("/", get(webui::index))
+        .route("/app.js", get(webui::app_js))
+        .route("/style.css", get(webui::style_css))
+        .route("/manifest.webmanifest", get(webui::manifest))
+        .route("/sw.js", get(webui::service_worker))
+        .route("/icon.svg", get(webui::icon_svg))
         .with_state(state);
 
     info!("Agent server listening on ws://{}/ws", bind_addr);
     info!(
         "Clients should connect with: --remote ws://{}:{}/ws --remote-secret <token>",
+        bind_addr.ip(),
+        bind_addr.port()
+    );
+    info!(
+        "Or open the mobile web client: http://{}:{}/",
         bind_addr.ip(),
         bind_addr.port()
     );
