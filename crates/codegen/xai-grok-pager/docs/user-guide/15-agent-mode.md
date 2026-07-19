@@ -55,6 +55,40 @@ Clients connect over WebSocket and authenticate with the secret token. If you om
 
 ---
 
+## Remote client (TUI)
+
+Connect your local interactive TUI to a `grok agent serve` instance running on
+another machine:
+
+```bash
+# On the remote machine (e.g. a dev box):
+grok agent serve --bind 0.0.0.0:2419 --secret <token>
+
+# On your local machine:
+grok --remote ws://devbox:2419/ws --remote-secret <token>
+```
+
+The TUI runs locally while the agent — including terminal commands, file
+edits, model authentication, and session persistence — runs entirely on the
+remote host. The secret can come from `--remote-secret`, the
+`GROK_AGENT_SECRET` environment variable, or a `?server-key=<token>` query
+parameter pasted from the server's startup banner.
+
+Notes:
+
+- Prefer `wss://` for anything beyond a trusted network (for example by
+  terminating TLS at a reverse proxy in front of `grok agent serve`);
+  standard `wss://` certificates work out of the box.
+- Sessions live on the remote host. If the connection drops, re-run
+  `grok --remote ...` and resume the session — the server keeps the agent
+  (and any in-flight prompt) alive across reconnects.
+- Agent-startup flags such as `--experimental-memory` or `--storage-mode`
+  have no effect in remote mode; configure them where the server runs.
+- The server currently streams updates to one client at a time: a second
+  connection takes over the update stream from the first.
+
+---
+
 ## WebSocket relay
 
 To reach the agent over the internet instead of the local network, run a WebSocket relay server and have the agent connect to it:

@@ -88,6 +88,19 @@ pub struct WsQueryParams {
     pub server_key: Option<String>,
 }
 
+/// Constant-time equality for secret comparison.
+///
+/// Folds the XOR of every byte pair so the comparison time does not depend on
+/// the position of the first mismatch (a plain `==` short-circuits, which
+/// leaks prefix-match length to a network attacker). Length is still compared
+/// up front — leaking the secret's length is acceptable.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Validate the bearer token from request headers or query parameters.
 fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &str) -> bool {
     // Try Authorization header
@@ -96,12 +109,12 @@ fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &s
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        return token == expected_secret;
+        return constant_time_eq(token.as_bytes(), expected_secret.as_bytes());
     }
 
     // Fall back to query parameter for browser connections
     if let Some(ref key) = query.server_key {
-        return key == expected_secret;
+        return constant_time_eq(key.as_bytes(), expected_secret.as_bytes());
     }
 
     false
@@ -459,9 +472,24 @@ pub async fn run_agent_server(
     config: ServerConfig,
     agent_config: AgentConfig,
 ) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(config.bind_addr).await?;
+    run_agent_server_on(listener, config.secret, agent_config).await
+}
+
+/// Run the agent WebSocket server on an already-bound listener.
+///
+/// Split out from [`run_agent_server`] so tests can bind `127.0.0.1:0`, read
+/// the ephemeral port with `TcpListener::local_addr`, and then hand the
+/// listener over.
+pub async fn run_agent_server_on(
+    listener: TcpListener,
+    secret: String,
+    agent_config: AgentConfig,
+) -> anyhow::Result<()> {
+    let bind_addr = listener.local_addr()?;
     let state = Arc::new(ServerState {
         agent_config,
-        secret: config.secret,
+        secret,
         agent_conn_tx: tokio::sync::Mutex::new(None),
     });
 
@@ -469,12 +497,11 @@ pub async fn run_agent_server(
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    let listener = TcpListener::bind(config.bind_addr).await?;
-    info!("Agent server listening on ws://{}/ws", config.bind_addr);
+    info!("Agent server listening on ws://{}/ws", bind_addr);
     info!(
-        "Clients should connect with: --remote ws://{}:{}/ws --secret <token>",
-        config.bind_addr.ip(),
-        config.bind_addr.port()
+        "Clients should connect with: --remote ws://{}:{}/ws --remote-secret <token>",
+        bind_addr.ip(),
+        bind_addr.port()
     );
 
     axum::serve(
@@ -484,4 +511,57 @@ pub async fn run_agent_server(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers_with_bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn constant_time_eq_matches_equal_and_rejects_unequal() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret2"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn validate_auth_accepts_header_and_query() {
+        let query_none = WsQueryParams::default();
+        assert!(validate_auth(
+            &headers_with_bearer("tok"),
+            &query_none,
+            "tok"
+        ));
+        assert!(!validate_auth(
+            &headers_with_bearer("wrong"),
+            &query_none,
+            "tok"
+        ));
+
+        let query = WsQueryParams {
+            server_key: Some("tok".into()),
+        };
+        assert!(validate_auth(&HeaderMap::new(), &query, "tok"));
+        assert!(!validate_auth(&HeaderMap::new(), &query_none, "tok"));
+    }
+
+    #[test]
+    fn validate_auth_header_takes_precedence_over_query() {
+        // A wrong header must not fall through to a correct query param.
+        let query = WsQueryParams {
+            server_key: Some("tok".into()),
+        };
+        assert!(!validate_auth(&headers_with_bearer("wrong"), &query, "tok"));
+    }
 }

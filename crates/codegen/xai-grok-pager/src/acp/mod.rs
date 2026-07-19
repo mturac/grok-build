@@ -257,7 +257,7 @@ pub async fn connect_via_leader(
 
     // These flags are baked into the agent at startup.  In leader mode the
     // agent is already running, so per-client overrides cannot be applied.
-    warn_unsupported_leader_flags(&flags);
+    warn_unsupported_shared_agent_flags(&flags, "leader mode");
 
     apply_config_writes(&flags);
 
@@ -366,17 +366,155 @@ pub async fn connect_via_leader(
     })
 }
 
+/// Connect to a remote agent server (`grok agent serve`) over WebSocket.
+///
+/// The remote server hosts the `MvpAgent`; this function dials it, bridges
+/// the raw ACP string channels into the same typed `(AcpAgentTx, AcpClientRx)`
+/// pair the other connectors produce, then runs the standard initialize +
+/// authenticate sequence. Auth (`session/new` model credentials, tool
+/// execution, session persistence) all happen on the remote host.
+///
+/// v1 has no automatic reconnect: when the socket drops, the bridge's cancel
+/// token fires and the pager exits. Re-running `grok --remote ...` and loading
+/// the session resumes losslessly — the server keeps the agent alive across
+/// connections.
+pub async fn connect_via_remote(
+    cancel: &CancellationToken,
+    flags: ConnectFlags,
+    raw_config: &toml::Value,
+    ws_url: &str,
+    secret: &str,
+) -> Result<AcpConnection> {
+    use xai_grok_shell::leader::ReconnectPolicy;
+
+    // The agent on the server was configured at `grok agent serve` startup;
+    // per-client agent-config overrides cannot apply.
+    warn_unsupported_shared_agent_flags(&flags, "remote mode");
+
+    // Everything must execute on the remote host. Advertising terminal/fs
+    // capabilities would make the remote agent delegate terminal commands and
+    // file IO back to THIS machine over ACP — the opposite of remote mode.
+    let flags = force_remote_capabilities(flags);
+
+    apply_config_writes(&flags);
+
+    let mut agent_config = AgentConfig::new_from_toml_cfg(raw_config)
+        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+    // resolve_telemetry_mode reads remote_settings.
+    agent_config.remote_settings = flags.remote_settings.clone();
+
+    let (remote_tx, remote_rx) = xai_grok_shell::agent::connect_remote_agent(
+        xai_grok_shell::agent::RemoteAgentConfig {
+            ws_url: ws_url.to_string(),
+            secret: secret.to_string(),
+        },
+        cancel.clone(),
+    )
+    .await?;
+
+    // No reconnector: on WS drop the bridge fires the cancel token and the
+    // caller observes a disconnect (manual reattach in v1).
+    let bridge = leader_bridge::bridge_channels(
+        remote_tx,
+        remote_rx,
+        cancel.clone(),
+        None,
+        ReconnectPolicy::bounded(),
+    )?;
+    let (tx, rx) = (bridge.channel.tx, bridge.channel.rx);
+
+    let (
+        models,
+        is_grok_shell,
+        auth_methods,
+        default_auth_method_id,
+        available_commands,
+        cancel_rewind_enabled,
+        session_recap_available,
+    ) = initialize(&tx, &flags).await?;
+
+    let (needs_login, login_label, login_method_id, auth_start_mode) =
+        startup_auth_metadata(&auth_methods);
+
+    let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
+        eager_auth_or_login_fallback(
+            &tx,
+            &auth_methods,
+            default_auth_method_id.as_ref(),
+            needs_login,
+            login_label,
+            login_method_id,
+            auth_start_mode,
+        )
+        .await;
+
+    // Like leader mode, the agent runs out-of-process, so build a dedicated
+    // non-refreshing AuthManager over the LOCAL auth.json for pager-side
+    // authenticated channels (voice STT/TTS, telemetry). Model-provider auth
+    // lives on the remote host and never touches this instance.
+    let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
+        &xai_grok_shell::util::grok_home::grok_home(),
+        agent_config.grok_com_config.clone(),
+    ));
+
+    xai_grok_shell::agent::init::update_telemetry_config(&agent_config, &auth_manager);
+
+    Ok(AcpConnection {
+        tx,
+        rx,
+        models,
+        is_grok_shell,
+        auth_methods,
+        cancel: bridge.cancel,
+        available_commands,
+        needs_login,
+        login_label,
+        login_method_id,
+        auth_start_mode,
+        auth_meta,
+        leader_status_rx: None,
+        cancel_rewind_enabled,
+        session_recap_available,
+        auth_manager,
+    })
+}
+
+/// Force client capabilities off for remote mode.
+///
+/// Hard invariant of remote mode: `terminal`, `fs_read`, and `fs_write` are
+/// always advertised as `false` so the remote agent runs terminals and file
+/// IO in-process on the remote host instead of delegating them to the local
+/// client over ACP.
+fn force_remote_capabilities(mut flags: ConnectFlags) -> ConnectFlags {
+    for (enabled, flag) in [
+        (flags.terminal, "--terminal"),
+        (flags.fs_read, "--fs-read"),
+        (flags.fs_write, "--fs-write"),
+    ] {
+        if enabled {
+            eprintln!(
+                "warning: {flag} is ignored in remote mode \
+                 (terminal and file IO always run on the remote host)"
+            );
+        }
+    }
+    flags.terminal = false;
+    flags.fs_read = false;
+    flags.fs_write = false;
+    flags
+}
+
 /// Warn about flags that only take effect in direct-spawn mode.
 ///
-/// In leader mode the agent is already running; these per-agent settings
-/// cannot be changed after the fact.
-fn warn_unsupported_leader_flags(flags: &ConnectFlags) {
+/// In leader and remote modes the agent is already running; these per-agent
+/// settings cannot be changed after the fact.
+fn warn_unsupported_shared_agent_flags(flags: &ConnectFlags, mode: &str) {
     // eprintln rather than tracing::warn because this runs before pager
     // TUI tracing is initialised — tracing output would be silently dropped.
     for flag in unsupported_leader_flags(flags) {
         eprintln!(
-            "warning: {flag} has no effect in leader mode \
-             (agent config is set at leader startup)"
+            "warning: {flag} has no effect in {mode} \
+             (agent config is set at agent startup)"
         );
     }
 }
@@ -1011,6 +1149,36 @@ mod tests {
             ..Default::default()
         };
         assert!(unsupported_leader_flags(&flags).is_empty());
+    }
+
+    // ── force_remote_capabilities ─────────────────────────────────
+
+    /// Remote-mode invariant: the initialize request must never advertise
+    /// terminal/fs capabilities, otherwise the remote agent would execute
+    /// terminal commands and file IO on the LOCAL machine via ACP delegation.
+    #[test]
+    fn force_remote_capabilities_disables_local_execution() {
+        let flags = force_remote_capabilities(ConnectFlags {
+            terminal: true,
+            fs_read: true,
+            fs_write: true,
+            ..Default::default()
+        });
+        assert!(!flags.terminal);
+        assert!(!flags.fs_read);
+        assert!(!flags.fs_write);
+    }
+
+    #[test]
+    fn force_remote_capabilities_preserves_other_flags() {
+        let flags = force_remote_capabilities(ConnectFlags {
+            terminal: true,
+            subagents: true,
+            client_identifier: Some("zed".into()),
+            ..Default::default()
+        });
+        assert!(flags.subagents);
+        assert_eq!(flags.client_identifier.as_deref(), Some("zed"));
     }
 
     #[test]

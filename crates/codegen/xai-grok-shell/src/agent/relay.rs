@@ -153,7 +153,7 @@ pub fn spawn_relay_connection_with_callback(
     (agent_to_ws_tx, handle)
 }
 /// Check if a connection error is an HTTP 401 from the WebSocket handshake.
-fn is_handshake_unauthorized(err: &anyhow::Error) -> bool {
+pub(crate) fn is_handshake_unauthorized(err: &anyhow::Error) -> bool {
     use tokio_tungstenite::tungstenite::Error as WsError;
     err.downcast_ref::<WsError>()
         .map(|ws_err| {

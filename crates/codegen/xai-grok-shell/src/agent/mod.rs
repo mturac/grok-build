@@ -13,6 +13,7 @@ pub mod models;
 pub mod mvp_agent;
 pub(crate) mod proxy;
 pub mod relay;
+pub mod remote_client;
 pub(crate) mod restore_code;
 pub mod roster;
 pub mod server;
@@ -25,7 +26,8 @@ pub(crate) mod update_chunk_merge;
 
 pub use mvp_agent::MvpAgent;
 pub use relay::{RelayConfig, RelayHandle, spawn_relay_connection};
-pub use server::{ServerConfig, run_agent_server};
+pub use remote_client::{RemoteAgentConfig, connect_remote_agent};
+pub use server::{ServerConfig, run_agent_server, run_agent_server_on};
 
 #[cfg(test)]
 mod storage_client_tests;
