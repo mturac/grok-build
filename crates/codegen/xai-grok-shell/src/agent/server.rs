@@ -16,14 +16,15 @@ use std::sync::Arc;
 use std::thread;
 
 use axum::{
-    Router,
+    Json, Router,
+    body::Bytes,
     extract::{
         ConnectInfo, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, simplex};
@@ -42,6 +43,8 @@ use xai_acp_lib::{
 use crate::agent::config::{Config as AgentConfig, ModelEntry};
 use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
 use crate::agent::mvp_agent::MvpAgent;
+use crate::agent::notify::PushStore;
+use crate::agent::notify::vapid::VapidKeys;
 use crate::agent::remote_client::REMOTE_PROTOCOL_VERSION;
 use crate::agent::webui;
 
@@ -81,6 +84,13 @@ struct ServerState {
     /// Lazily initialised on first connection; protected by a tokio Mutex so the
     /// axum handler (which is `Send`) can acquire it.
     agent_conn_tx: tokio::sync::Mutex<Option<mpsc::UnboundedSender<NewConnectionChannels>>>,
+    /// Server-global Web Push subscription store (persisted under `$GROK_HOME`).
+    /// Written by the authenticated `/push/subscribe` routes, read by the push
+    /// notifier when an event fires.
+    push_store: PushStore,
+    /// VAPID keypair identifying this server to push services. The public key is
+    /// served to the PWA; the private key signs each push's auth header.
+    vapid: Arc<VapidKeys>,
 }
 
 /// Channels bridging a single WebSocket connection to the agent thread.
@@ -126,6 +136,73 @@ fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &s
     }
 
     false
+}
+
+/// `GET /push/vapid-public-key` — hand the PWA the server's VAPID public key so
+/// it can call `PushManager.subscribe({ applicationServerKey })`. Secret-gated.
+async fn push_vapid_public_key(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<WsQueryParams>,
+) -> Response {
+    if !validate_auth(&headers, &query, &state.secret) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing authorization token",
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({ "publicKey": state.vapid.public_key_b64() })).into_response()
+}
+
+/// `POST /push/subscribe` — register a browser push subscription. Secret-gated.
+/// The body is taken raw and parsed only AFTER auth, so an unauthenticated
+/// caller can never reach the JSON parser.
+async fn push_subscribe(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<WsQueryParams>,
+    body: Bytes,
+) -> Response {
+    if !validate_auth(&headers, &query, &state.secret) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing authorization token",
+        )
+            .into_response();
+    }
+    let sub: crate::agent::notify::PushSubscription = match serde_json::from_slice(&body) {
+        Ok(s) => s,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid subscription json").into_response(),
+    };
+    state.push_store.add(sub).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /push/unsubscribe` — drop a subscription by endpoint. Secret-gated.
+async fn push_unsubscribe(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<WsQueryParams>,
+    body: Bytes,
+) -> Response {
+    if !validate_auth(&headers, &query, &state.secret) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing authorization token",
+        )
+            .into_response();
+    }
+    #[derive(serde::Deserialize)]
+    struct UnsubscribeBody {
+        endpoint: String,
+    }
+    let parsed: UnsubscribeBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid unsubscribe json").into_response(),
+    };
+    state.push_store.remove(&parsed.endpoint).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// WebSocket upgrade handler with authentication.
@@ -517,11 +594,21 @@ pub async fn run_agent_server_on(
     let bind_addr = listener.local_addr()?;
     let instance_id = uuid::Uuid::new_v4().to_string();
     info!(agent_instance_id = %instance_id, "generated agent instance id for this server process");
+
+    // Web Push transport: load the persisted subscription store and the VAPID
+    // keypair (generated + persisted on first run) from the user-global grok
+    // home. Both are server-global and shared with the push notifier.
+    let grok_home = xai_grok_config::grok_home();
+    let push_store = PushStore::load(&grok_home);
+    let vapid = Arc::new(VapidKeys::load_or_generate(&grok_home)?);
+
     let state = Arc::new(ServerState {
         agent_config,
         secret,
         instance_id,
         agent_conn_tx: tokio::sync::Mutex::new(None),
+        push_store,
+        vapid,
     });
 
     let app = Router::new()
@@ -535,6 +622,11 @@ pub async fn run_agent_server_on(
         .route("/manifest.webmanifest", get(webui::manifest))
         .route("/sw.js", get(webui::service_worker))
         .route("/icon.svg", get(webui::icon_svg))
+        // Web Push subscription management. Unlike the static PWA shell routes
+        // above, these carry data and are secret-gated exactly like `/ws`.
+        .route("/push/vapid-public-key", get(push_vapid_public_key))
+        .route("/push/subscribe", post(push_subscribe))
+        .route("/push/unsubscribe", post(push_unsubscribe))
         .with_state(state);
 
     info!("Agent server listening on ws://{}/ws", bind_addr);
