@@ -5,6 +5,7 @@
 //! spec `docs/superpowers/specs/2026-07-19-ci-guardian-design.md`.
 
 pub mod classify;
+pub mod controller;
 pub mod fix;
 pub mod gh;
 pub mod job;
