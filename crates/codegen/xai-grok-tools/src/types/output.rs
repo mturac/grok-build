@@ -646,6 +646,7 @@ pub enum ToolOutput {
     SchedulerCreate(crate::implementations::grok_build::scheduler::create::SchedulerCreateOutput),
     SchedulerDelete(crate::implementations::grok_build::scheduler::delete::SchedulerDeleteOutput),
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListOutput),
+    CiGuard(crate::implementations::grok_build::ci_guard::tool::CiGuardOutput),
     UpdateGoal(crate::implementations::grok_build::update_goal::UpdateGoalOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
@@ -975,6 +976,19 @@ impl ToolOutput {
                 }
             }
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
+            ToolOutput::CiGuard(o) => {
+                // Include the structured data (headSha/logsTail/failingTests) so
+                // the agent has what it needs to produce a fix and call commit_fix.
+                if o.data.is_null() {
+                    o.message.clone()
+                } else {
+                    format!(
+                        "{}\n{}",
+                        o.message,
+                        serde_json::to_string_pretty(&o.data).unwrap_or_default()
+                    )
+                }
+            }
             ToolOutput::Dynamic(v) => serde_json::to_string_pretty(&v.value).unwrap_or_default(),
             ToolOutput::Text(text) => text.text.clone(),
             ToolOutput::ImageGen(m) => m.prompt_text("Image generated"),

@@ -107,6 +107,69 @@ async fn run_gh(args: &[&str]) -> anyhow::Result<std::process::Output> {
     Ok(tokio::process::Command::new("gh").args(args).output().await?)
 }
 
+#[derive(Deserialize)]
+struct RunItem {
+    #[serde(rename = "databaseId")]
+    database_id: u64,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+/// The database id of the first failed workflow run in a `gh run list --json
+/// databaseId,conclusion` array. Pure, unit-tested.
+pub(crate) fn first_failed_run_id(json: &str) -> Option<u64> {
+    let items: Vec<RunItem> = serde_json::from_str(json).ok()?;
+    items
+        .into_iter()
+        .find(|r| r.conclusion.as_deref() == Some("failure"))
+        .map(|r| r.database_id)
+}
+
+/// Best-effort fetch of the failing logs for the run at `head_sha`. Returns the
+/// tail (bounded) of `gh run view --log-failed`, or an empty string if anything
+/// is unavailable (expired logs, fork PR, no access) — the caller treats empty
+/// logs as an un-diagnosable (Ambiguous) failure rather than erroring.
+pub async fn fetch_failure_logs(repo: &str, head_sha: &str) -> String {
+    let list = match run_gh(&[
+        "run",
+        "list",
+        "--repo",
+        repo,
+        "-c",
+        head_sha,
+        "--json",
+        "databaseId,conclusion",
+        "--limit",
+        "15",
+    ])
+    .await
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return String::new(),
+    };
+    let Some(run_id) = first_failed_run_id(&String::from_utf8_lossy(&list)) else {
+        return String::new();
+    };
+    let logs = match run_gh(&[
+        "run",
+        "view",
+        &run_id.to_string(),
+        "--repo",
+        repo,
+        "--log-failed",
+    ])
+    .await
+    {
+        Ok(o) => o.stdout,
+        _ => return String::new(),
+    };
+    let text = String::from_utf8_lossy(&logs);
+    // Bound the size: keep the last ~200 lines (the failure is at the end).
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(200);
+    lines[start..].join("\n")
+}
+
 /// Fail-closed preflight: confirm `gh` is authenticated and the repo is
 /// reachable before any watch does work. On failure returns `Blocked(reason)`
 /// so the controller can notify + pause rather than mistake a missing token for
@@ -231,6 +294,17 @@ mod tests {
             parse_check_rollup(r#"[{"bucket":"pass"},{"bucket":"skipping"}]"#).unwrap(),
             CiState::Passed
         );
+    }
+
+    #[test]
+    fn first_failed_run_id_picks_the_failure() {
+        let json = r#"[{"databaseId":111,"conclusion":"success"},{"databaseId":222,"conclusion":"failure"}]"#;
+        assert_eq!(first_failed_run_id(json), Some(222));
+        assert_eq!(
+            first_failed_run_id(r#"[{"databaseId":1,"conclusion":"success"}]"#),
+            None
+        );
+        assert_eq!(first_failed_run_id("garbage"), None);
     }
 
     #[test]

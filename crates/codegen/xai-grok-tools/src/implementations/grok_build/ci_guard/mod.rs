@@ -9,4 +9,5 @@ pub mod controller;
 pub mod fix;
 pub mod gh;
 pub mod job;
+pub mod tool;
 pub mod types;
