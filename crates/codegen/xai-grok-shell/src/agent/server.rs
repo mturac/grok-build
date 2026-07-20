@@ -602,6 +602,20 @@ pub async fn run_agent_server_on(
     let push_store = PushStore::load(&grok_home);
     let vapid = Arc::new(VapidKeys::load_or_generate(&grok_home)?);
 
+    // Publish the process-wide out-of-band notifier so each session's
+    // notification bridge can also deliver to Web Push subscribers. The `sub`
+    // claim is a self-hosting contact URI; push services don't validate it
+    // strictly. FanoutNotifier keeps room for more sinks (e.g. a shell-command
+    // notifier) without touching the bridge.
+    let web_push = std::sync::Arc::new(crate::agent::notify::WebPushNotifier::new(
+        push_store.clone(),
+        vapid.clone(),
+        "mailto:grok-agent@localhost",
+    ));
+    crate::agent::notify::set_global_notifier(std::sync::Arc::new(
+        crate::agent::notify::FanoutNotifier::new(vec![web_push]),
+    ));
+
     let state = Arc::new(ServerState {
         agent_config,
         secret,

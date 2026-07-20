@@ -44,6 +44,53 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// Web Push: payload-less "wake" pings. The server sends no encrypted body in
+// this MVP, so render a generic line; tapping opens the PWA, which pulls the
+// actual activity over the WebSocket. `userVisibleOnly` subscriptions REQUIRE
+// showing a notification for every push, so always show one.
+self.addEventListener("push", (event) => {
+  let body = "New agent activity — tap to open.";
+  // Tolerate an (optional, future) JSON payload without breaking the no-payload
+  // path: if data is present and parses, use its title/body.
+  let title = "Grok";
+  if (event.data) {
+    try {
+      const payload = event.data.json();
+      if (payload && typeof payload === "object") {
+        if (payload.title) title = String(payload.title);
+        if (payload.body) body = String(payload.body);
+      }
+    } catch (_err) {
+      /* payload-less or non-JSON: keep the generic line */
+    }
+  }
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      icon: "/icon.svg",
+      badge: "/icon.svg",
+      tag: "grok-activity",
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clientList) => {
+        for (const client of clientList) {
+          if (client.url.startsWith(self.location.origin) && "focus" in client) {
+            return client.focus();
+          }
+        }
+        if (self.clients.openWindow) return self.clients.openWindow("/");
+        return undefined;
+      }),
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;

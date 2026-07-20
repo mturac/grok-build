@@ -170,4 +170,28 @@ mod tests {
             );
         }
     }
+
+    /// The PWA client must carry the Web Push wiring: `app.js` subscribes via
+    /// `PushManager` and posts to `/push/subscribe`; `sw.js` handles incoming
+    /// `push` events and `notificationclick`. Guards against a refactor
+    /// silently dropping the push path from the shipped assets.
+    #[test]
+    fn pwa_assets_contain_web_push_wiring() {
+        assert!(
+            APP_JS.contains("pushManager"),
+            "app.js must subscribe via PushManager"
+        );
+        assert!(
+            APP_JS.contains("/push/subscribe"),
+            "app.js must register the subscription with the server"
+        );
+        assert!(
+            SW_JS.contains("addEventListener(\"push\""),
+            "sw.js must handle incoming push events"
+        );
+        assert!(
+            SW_JS.contains("addEventListener(\"notificationclick\""),
+            "sw.js must handle notification clicks"
+        );
+    }
 }
