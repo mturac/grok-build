@@ -6,4 +6,5 @@
 
 pub mod classify;
 pub mod gh;
+pub mod job;
 pub mod types;
