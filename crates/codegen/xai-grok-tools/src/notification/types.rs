@@ -334,6 +334,28 @@ pub struct ScheduledTaskCreated {
     pub next_fire_at: Option<String>,
 }
 
+/// A CI Guardian lifecycle event. One notification variant carries all of the
+/// guardian's user-facing outcomes; the shell's notification bridge maps each to
+/// an in-band ext notification and an out-of-band push.
+#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CiGuardEvent {
+    /// A watch was started for a PR.
+    WatchStarted { pr: u64, repo: String },
+    /// A fix was prepared on a local branch and is ready for human review/push.
+    FixReady {
+        pr: u64,
+        branch: String,
+        diff_summary: String,
+    },
+    /// A failure was diagnosed as not autonomously fixable.
+    CannotAutofix { pr: u64, reason: String },
+    /// The guardian is paused (e.g. gh auth/preflight failure).
+    Blocked { pr: u64, reason: String },
+    /// Progress of the bounded investigation job (queued/running/cancelled/…).
+    JobState { pr: u64, state: String },
+}
+
 /// A streaming event from a Monitor tool background process.
 /// Each event is an XML-wrapped stdout line (or batch of lines) that should
 /// be injected into the conversation as a user-role message.
@@ -418,6 +440,9 @@ pub enum ToolNotification {
 
     /// A streaming event from a monitor background process.
     MonitorEvent(MonitorEvent),
+
+    /// A CI Guardian lifecycle event (watch/fix-ready/cannot-fix/blocked/job).
+    CiGuardEvent(CiGuardEvent),
 }
 
 /// Single source of truth for the `(variant tag => payload type)` mapping of
@@ -479,6 +504,7 @@ notification_variants! {
     ScheduledTaskRemoved => ScheduledTaskRemoved,
     ScheduledTaskCreated => ScheduledTaskCreated,
     MonitorEvent => MonitorEvent,
+    CiGuardEvent => CiGuardEvent,
 }
 
 #[cfg(test)]

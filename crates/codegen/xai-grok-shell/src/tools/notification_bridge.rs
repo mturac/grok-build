@@ -125,6 +125,50 @@ pub(crate) fn scheduled_task_fired_notification(
     }
 }
 
+/// Map a CI Guardian event to an out-of-band [`AgentNotification`]. Pure mapping,
+/// unit-tested; the in-band ext-notification is emitted separately in the bridge.
+pub(crate) fn ci_guard_notification(
+    event: &xai_grok_tools::notification::CiGuardEvent,
+) -> AgentNotification {
+    use xai_grok_tools::notification::CiGuardEvent as E;
+    match event {
+        E::WatchStarted { pr, repo } => AgentNotification {
+            kind: "ci_watch_started".into(),
+            title: format!("CI Guardian watching {repo} #{pr}"),
+            body: String::new(),
+            meta: serde_json::json!({ "pr": pr, "repo": repo }),
+        },
+        E::FixReady {
+            pr,
+            branch,
+            diff_summary,
+        } => AgentNotification {
+            kind: "ci_fix_ready".into(),
+            title: format!("CI fix ready for #{pr}"),
+            body: format!("Branch {branch} — review and push.\n{diff_summary}"),
+            meta: serde_json::json!({ "pr": pr, "branch": branch, "diffSummary": diff_summary }),
+        },
+        E::CannotAutofix { pr, reason } => AgentNotification {
+            kind: "ci_cannot_autofix".into(),
+            title: format!("CI failure on #{pr} needs you"),
+            body: format!("Could not auto-fix: {reason}"),
+            meta: serde_json::json!({ "pr": pr, "reason": reason }),
+        },
+        E::Blocked { pr, reason } => AgentNotification {
+            kind: "ci_blocked".into(),
+            title: format!("CI Guardian blocked on #{pr}"),
+            body: reason.clone(),
+            meta: serde_json::json!({ "pr": pr, "reason": reason }),
+        },
+        E::JobState { pr, state } => AgentNotification {
+            kind: "ci_job_state".into(),
+            title: format!("CI Guardian #{pr}: {state}"),
+            body: String::new(),
+            meta: serde_json::json!({ "pr": pr, "state": state }),
+        },
+    }
+}
+
 /// Snapshot a shared `OnceLock` tool-name slot as a borrowed `&str`.
 /// Returns `None` if the slot is still unset (toolset not yet finalized)
 /// or if the resolved value is `None` (no such tool registered in this
@@ -744,6 +788,26 @@ async fn handle_notification(
             }
         }
 
+        ToolNotification::CiGuardEvent(event) => {
+            // Out-of-band push (if a transport is wired), fire-and-forget.
+            if let Some(notifier) = &config.notifier {
+                let notifier = notifier.clone();
+                let ev = ci_guard_notification(&event);
+                let _ = tokio::spawn(async move { notifier.notify(&ev).await });
+            }
+            // In-band: forward as an ext notification the pager/PWA can render.
+            if let Ok(params) =
+                serde_json::to_value(&event).and_then(|v| serde_json::value::to_raw_value(&v))
+            {
+                config
+                    .gateway
+                    .forward_fire_and_forget(acp::ExtNotification::new(
+                        "x.ai/ci_guard_event",
+                        params.into(),
+                    ));
+            }
+        }
+
         ToolNotification::MonitorEvent(event) => {
             // Cross-session guard: in leader mode many sessions share one agent
             // process, so drop events whose owner isn't this bridge's session
@@ -1018,6 +1082,41 @@ mod tests {
         assert_eq!(ev.meta["taskId"], "abc123");
         assert_eq!(ev.meta["humanSchedule"], "every 5 minutes");
         assert_eq!(ev.meta["nextFireAt"], "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn ci_guard_fix_ready_maps_fields() {
+        let event = xai_grok_tools::notification::CiGuardEvent::FixReady {
+            pr: 42,
+            branch: "grok-ci-fix/42-abc12345".into(),
+            diff_summary: " src/lib.rs | 2 +-".into(),
+        };
+        let ev = ci_guard_notification(&event);
+        assert_eq!(ev.kind, "ci_fix_ready");
+        assert!(ev.title.contains("#42"));
+        assert!(ev.body.contains("grok-ci-fix/42-abc12345"));
+        assert_eq!(ev.meta["pr"], 42);
+        assert_eq!(ev.meta["branch"], "grok-ci-fix/42-abc12345");
+    }
+
+    #[test]
+    fn ci_guard_cannot_autofix_and_blocked_carry_reason() {
+        let cannot = ci_guard_notification(
+            &xai_grok_tools::notification::CiGuardEvent::CannotAutofix {
+                pr: 7,
+                reason: "flaky".into(),
+            },
+        );
+        assert_eq!(cannot.kind, "ci_cannot_autofix");
+        assert!(cannot.body.contains("flaky"));
+
+        let blocked =
+            ci_guard_notification(&xai_grok_tools::notification::CiGuardEvent::Blocked {
+                pr: 7,
+                reason: "auth".into(),
+            });
+        assert_eq!(blocked.kind, "ci_blocked");
+        assert_eq!(blocked.meta["reason"], "auth");
     }
 
     fn make_task_snapshot(task_id: &str, kind: TaskKind) -> TaskSnapshot {

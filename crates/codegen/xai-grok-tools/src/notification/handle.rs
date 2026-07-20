@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::types::{
     BashExecutionBackgrounded, BashExecutionComplete, BashExecutionFailed, BashExecutionTimeout,
-    BashOutputChunk, FileWritten, LspServerCrashed, LspServerFailed, LspServerReady,
+    BashOutputChunk, CiGuardEvent, FileWritten, LspServerCrashed, LspServerFailed, LspServerReady,
     LspServerRetrying, LspServerStarting, MonitorEvent, PlanModeEntered, PlanModeExited,
     ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved, ToolNotification,
     UserQuestionAsked,
@@ -252,6 +252,7 @@ impl ToolNotificationHandle {
         send_scheduled_task_removed, ScheduledTaskRemoved, ScheduledTaskRemoved;
         send_scheduled_task_created, ScheduledTaskCreated, ScheduledTaskCreated;
         send_monitor_event, MonitorEvent, MonitorEvent;
+        send_ci_guard_event, CiGuardEvent, CiGuardEvent;
     }
 }
 
