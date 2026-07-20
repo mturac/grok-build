@@ -49,6 +49,7 @@ pub use kill_task::{KillTaskTool, KillTerminalCommandTool};
 pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
 pub use ci_guard::tool::{CI_GUARD_TOOL_NAME, CiGuardTool};
+pub use orchestrate::{ORCHESTRATE_TOOL_NAME, OrchestrateTool};
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{
