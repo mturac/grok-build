@@ -509,10 +509,15 @@
           return;
         }
       }
+      // Send the secret in the Authorization header, NOT as a ?server-key=
+      // query param: unlike the WS upgrade, these are plain HTTP GET/POST whose
+      // full URL (secret included) could land in a reverse-proxy access log or
+      // a Referer header. validate_auth checks the Bearer header first, so this
+      // keeps the secret out of URLs entirely. (Same-origin fetch, so it was
+      // never in browser history, but access logs are the real exposure.)
+      const authHeaders = { authorization: `Bearer ${state.secret}` };
       const reg = await navigator.serviceWorker.ready;
-      const keyResp = await fetch(
-        `/push/vapid-public-key?server-key=${encodeURIComponent(state.secret)}`,
-      );
+      const keyResp = await fetch("/push/vapid-public-key", { headers: authHeaders });
       if (!keyResp.ok) {
         state.pushSetupDone = false;
         return;
@@ -526,9 +531,9 @@
         });
       }
       const keys = sub.toJSON().keys || {};
-      await fetch(`/push/subscribe?server-key=${encodeURIComponent(state.secret)}`, {
+      await fetch("/push/subscribe", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { ...authHeaders, "content-type": "application/json" },
         body: JSON.stringify({
           endpoint: sub.endpoint,
           p256dh: keys.p256dh || "",
