@@ -7,4 +7,7 @@
 
 pub mod fanout;
 pub mod gather;
+pub mod tool;
 pub mod types;
+
+pub use tool::{ORCHESTRATE_TOOL_NAME, OrchestrateTool};
