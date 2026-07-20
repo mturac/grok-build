@@ -11,6 +11,7 @@
 pub mod ask_user_question;
 pub mod bash;
 pub mod ci_guard;
+pub mod orchestrate;
 #[path = "deploy_app_stub.rs"]
 pub mod deploy_app;
 pub mod enter_plan_mode;
