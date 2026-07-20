@@ -27,6 +27,10 @@ const RECORD_SIZE: u32 = 4096;
 
 /// Length of an uncompressed SEC1 P-256 point (0x04 || X(32) || Y(32)).
 const P256_POINT_LEN: usize = 65;
+/// Web Push subscription `auth` secret length (RFC 8291).
+const AUTH_SECRET_LEN: usize = 16;
+/// AES-128-GCM authentication tag length appended to the ciphertext.
+const AES_GCM_TAG_LEN: usize = 16;
 
 /// Length of the RFC 8188 aes128gcm header: salt(16) || rs(4) || idlen(1) || keyid(65).
 const HEADER_LEN: usize = 16 + 4 + 1 + P256_POINT_LEN;
@@ -70,6 +74,26 @@ fn derive_cek_and_nonce(
 /// `auth` = the subscription's 16-byte auth secret. Returns the full aes128gcm
 /// body (ready to POST with `Content-Encoding: aes128gcm`).
 pub fn encrypt(plaintext: &[u8], ua_public: &[u8], auth: &[u8]) -> Result<Vec<u8>> {
+    // The uncompressed 65-byte point is used verbatim in `key_info`; a
+    // compressed (33-byte) key would parse but derive a key the browser can't
+    // reproduce, so require the exact form for interop.
+    if ua_public.len() != P256_POINT_LEN {
+        bail!(
+            "subscription p256dh must be a 65-byte uncompressed P-256 point, got {}",
+            ua_public.len()
+        );
+    }
+    if auth.len() != AUTH_SECRET_LEN {
+        bail!(
+            "subscription auth secret must be {AUTH_SECRET_LEN} bytes, got {}",
+            auth.len()
+        );
+    }
+    // Single-record encoding: the whole payload + delimiter + GCM tag must fit
+    // in the advertised record size.
+    if plaintext.len() + 1 + AES_GCM_TAG_LEN > RECORD_SIZE as usize {
+        bail!("push payload too large for a single aes128gcm record");
+    }
     let ua_public_key =
         PublicKey::from_sec1_bytes(ua_public).context("parsing subscription p256dh key")?;
 
