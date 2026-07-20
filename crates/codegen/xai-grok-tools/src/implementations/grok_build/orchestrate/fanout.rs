@@ -66,8 +66,14 @@ fn build_request(base: &RequestBase, prompt: &str, description: &str) -> Subagen
 }
 
 /// Spawn one sub-agent and reduce its result to `Some(output)` on success or
-/// `None` on any failure/error/cancel.
-async fn spawn_one(backend: &dyn SubagentBackend, base: &RequestBase, prompt: &str, label: &str) -> Option<String> {
+/// `None` on any failure/error/cancel. Shared with the gather step (verifier /
+/// synthesizer sub-agents).
+pub(crate) async fn spawn_one(
+    backend: &dyn SubagentBackend,
+    base: &RequestBase,
+    prompt: &str,
+    label: &str,
+) -> Option<String> {
     let request = build_request(base, prompt, label);
     match backend.spawn(request).await {
         Ok(result) if result.success => Some(result.output.to_string()),
@@ -140,7 +146,21 @@ pub(crate) mod test_support {
         ) -> Result<SubagentResult, xai_tool_runtime::ToolError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let success = !request.prompt.contains("FAIL");
-            Ok(mk_result(success, &format!("out:{}", request.prompt)))
+            // Verdict-aware so gather tests can drive verify/synthesize paths:
+            // a verifier prompt echoes CONFIRMED unless the text says REFUTE-ME;
+            // a synthesizer prompt echoes a marker.
+            let output = if request.prompt.contains("Adversarially verify") {
+                if request.prompt.contains("REFUTE-ME") {
+                    "REFUTED".to_string()
+                } else {
+                    "CONFIRMED".to_string()
+                }
+            } else if request.prompt.contains("sub-task results") {
+                "SYNTHESIZED".to_string()
+            } else {
+                format!("out:{}", request.prompt)
+            };
+            Ok(mk_result(success, &output))
         }
         async fn query(&self, _id: &str, _block: bool, _t: Option<u64>) -> Option<SubagentSnapshot> {
             None

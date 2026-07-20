@@ -6,4 +6,5 @@
 //! fixed at call time. See `docs/superpowers/specs/2026-07-20-orchestrate-fanout-verify-design.md`.
 
 pub mod fanout;
+pub mod gather;
 pub mod types;
