@@ -16,6 +16,7 @@ commands, searches the web, and manages long-running tasks — interactively,
 headlessly for scripting/CI, or embedded in editors via the Agent Client
 Protocol (ACP).
 
+[What this fork adds](#what-this-fork-adds) ·
 [Installing the released binary](#installing-the-released-binary) ·
 [Building from source](#building-from-source) ·
 [Documentation](#documentation) ·
@@ -37,6 +38,37 @@ for the version of the code present in this tree.
 </div>
 
 ---
+
+## What this fork adds
+
+On top of the upstream agent, this fork adds a set of "connect from anywhere +
+automate" features. All of them build on the existing `grok agent serve`
+WebSocket server and the sub-agent runtime — details in the
+[agent-mode guide](crates/codegen/xai-grok-pager/docs/user-guide/15-agent-mode.md).
+
+- **Remote connect.** Run the agent on one machine (`grok agent serve`) and
+  attach from another with the `--remote` TUI client — with automatic
+  reconnect and session replay so a dropped network or a server restart
+  resumes where you left off.
+- **Mobile / browser client (PWA).** `grok agent serve` also serves an
+  installable chat client at `http://<host>:2419/` — open it on your phone,
+  "Add to Home Screen", and drive the agent from anywhere. Renders Markdown
+  and code blocks (with copy), tool-call cards with `+/-` diffs, collapsible
+  reasoning, and a light/dark theme.
+- **Web Push notifications.** The PWA can register for VAPID Web Push, so your
+  phone is alerted to background agent activity (a scheduled task, a prepared
+  fix) even when the app is closed.
+- **CI Guardian (`/ci-guard`).** Watches a GitHub PR's CI and, on a confident
+  code failure, diagnoses it and prepares a fix on an isolated local branch for
+  you to review — it **never pushes, merges, or deploys**. One autonomous
+  attempt per PR until you re-arm, so it can't run away.
+- **Deterministic orchestration (`orchestrate`).** Fan a task out to several
+  sub-agents in parallel in one call, wait for all of them, then synthesize the
+  results — or run each through an independent verifier and keep only the
+  confirmed ones.
+
+> These features live in this fork; the rest of the tree is synced from the
+> upstream SpaceXAI monorepo as described above.
 
 ## Installing the released binary
 
