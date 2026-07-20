@@ -534,6 +534,10 @@ pub(crate) async fn spawn_session_actor(
             auto_wake_enabled: tool_context.auto_wake_enabled,
             queue_exit_reminder_on_approved_exit: queue_exit_reminder_on_approved_exit.clone(),
             goal_loop_active: tool_context.goal_loop_active_gate.clone(),
+            // Out-of-band push notifier, if `grok agent serve` published one at
+            // startup (None in local TUI / leader modes). In-band ACP delivery
+            // is unaffected either way.
+            notifier: crate::agent::notify::global_notifier(),
         },
     );
     let tool_context_for_handle = tool_context.clone();

@@ -12,6 +12,7 @@ use xai_grok_tools::notification::types::{ToolNotification, ToolNotificationHand
 use xai_grok_tools::types::output::{BashOutput, ToolOutput};
 use xai_hunk_tracker::HunkTrackerHandle;
 
+use crate::agent::notify::{AgentNotification, Notifier};
 use crate::session::commands::SessionCommand;
 use crate::session::commands::{NotificationPriority, NotificationSource};
 use crate::session::persistence::PersistenceMsg;
@@ -96,6 +97,76 @@ pub struct NotificationBridgeConfig {
     /// written at one chokepoint — see
     /// `SessionActor::set_goal_loop_active_resource` for the rationale.
     pub goal_loop_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Optional out-of-band notifier (Web Push, etc.). Additive: in-band ACP
+    /// delivery stays on the native `gateway` path above; when set, selected
+    /// events are ALSO dispatched here so they reach clients that are not
+    /// currently attached over the WebSocket. `None` in every mode that has no
+    /// push transport wired (the default).
+    pub notifier: Option<Arc<dyn Notifier>>,
+}
+
+/// Map a fired scheduled task to an out-of-band [`AgentNotification`].
+///
+/// Pure mapping, unit-tested in isolation. In-band ACP delivery is unaffected —
+/// this only feeds the additive `notifier` sink (e.g. Web Push).
+pub(crate) fn scheduled_task_fired_notification(
+    fired: &xai_grok_tools::notification::types::ScheduledTaskFired,
+) -> AgentNotification {
+    AgentNotification {
+        kind: "scheduled_task_fired".into(),
+        title: format!("Scheduled task fired ({})", fired.human_schedule),
+        body: fired.prompt.clone(),
+        meta: serde_json::json!({
+            "taskId": fired.task_id,
+            "humanSchedule": fired.human_schedule,
+            "nextFireAt": fired.next_fire_at,
+        }),
+    }
+}
+
+/// Map a CI Guardian event to an out-of-band [`AgentNotification`]. Pure mapping,
+/// unit-tested; the in-band ext-notification is emitted separately in the bridge.
+pub(crate) fn ci_guard_notification(
+    event: &xai_grok_tools::notification::CiGuardEvent,
+) -> AgentNotification {
+    use xai_grok_tools::notification::CiGuardEvent as E;
+    match event {
+        E::WatchStarted { pr, repo } => AgentNotification {
+            kind: "ci_watch_started".into(),
+            title: format!("CI Guardian watching {repo} #{pr}"),
+            body: String::new(),
+            meta: serde_json::json!({ "pr": pr, "repo": repo }),
+        },
+        E::FixReady {
+            pr,
+            branch,
+            diff_summary,
+        } => AgentNotification {
+            kind: "ci_fix_ready".into(),
+            title: format!("CI fix ready for #{pr}"),
+            body: format!("Branch {branch} — review and push.\n{diff_summary}"),
+            meta: serde_json::json!({ "pr": pr, "branch": branch, "diffSummary": diff_summary }),
+        },
+        E::CannotAutofix { pr, reason } => AgentNotification {
+            kind: "ci_cannot_autofix".into(),
+            title: format!("CI failure on #{pr} needs you"),
+            body: format!("Could not auto-fix: {reason}"),
+            meta: serde_json::json!({ "pr": pr, "reason": reason }),
+        },
+        E::Blocked { pr, reason } => AgentNotification {
+            kind: "ci_blocked".into(),
+            title: format!("CI Guardian blocked on #{pr}"),
+            body: reason.clone(),
+            meta: serde_json::json!({ "pr": pr, "reason": reason }),
+        },
+        E::JobState { pr, state } => AgentNotification {
+            kind: "ci_job_state".into(),
+            title: format!("CI Guardian #{pr}: {state}"),
+            body: String::new(),
+            meta: serde_json::json!({ "pr": pr, "state": state }),
+        },
+    }
 }
 
 /// Snapshot a shared `OnceLock` tool-name slot as a borrowed `&str`.
@@ -665,6 +736,20 @@ async fn handle_notification(
                 "Scheduled task fired, injecting prompt into session"
             );
 
+            // Additive out-of-band delivery (Web Push): fire-and-forget so a
+            // slow push transport never blocks the bridge loop. Built from
+            // `&fired` before its fields are moved into the in-band notification
+            // below. In-band ACP forwarding is unchanged.
+            if let Some(notifier) = &config.notifier {
+                let notifier = notifier.clone();
+                let ev = scheduled_task_fired_notification(&fired);
+                // Detached on purpose: fire-and-forget so a slow push transport
+                // cannot block the bridge loop. Delivery failures are handled by
+                // the push sink itself (dead subscriptions are pruned in the
+                // Web Push task).
+                let _ = tokio::spawn(async move { notifier.notify(&ev).await });
+            }
+
             let inject_payload = serde_json::json!({
                 "sessionId": config.session_id,
                 "taskId": &fired.task_id,
@@ -698,6 +783,26 @@ async fn handle_notification(
                     .gateway
                     .forward_fire_and_forget(acp::ExtNotification::new(
                         "x.ai/scheduled_task_fired",
+                        params.into(),
+                    ));
+            }
+        }
+
+        ToolNotification::CiGuardEvent(event) => {
+            // Out-of-band push (if a transport is wired), fire-and-forget.
+            if let Some(notifier) = &config.notifier {
+                let notifier = notifier.clone();
+                let ev = ci_guard_notification(&event);
+                let _ = tokio::spawn(async move { notifier.notify(&ev).await });
+            }
+            // In-band: forward as an ext notification the pager/PWA can render.
+            if let Ok(params) =
+                serde_json::to_value(&event).and_then(|v| serde_json::value::to_raw_value(&v))
+            {
+                config
+                    .gateway
+                    .forward_fire_and_forget(acp::ExtNotification::new(
+                        "x.ai/ci_guard_event",
                         params.into(),
                     ));
             }
@@ -953,8 +1058,65 @@ mod tests {
                 false,
             )),
             goal_loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            notifier: None,
         };
         (config, gateway_rx, persistence_rx, session_cmd_rx)
+    }
+
+    #[test]
+    fn scheduled_task_fired_notification_maps_fields() {
+        let fired = xai_grok_tools::notification::types::ScheduledTaskFired {
+            task_id: "abc123".into(),
+            prompt: "run the deploy check".into(),
+            human_schedule: "every 5 minutes".into(),
+            next_fire_at: Some("2026-01-01T00:00:00Z".into()),
+        };
+        let ev = scheduled_task_fired_notification(&fired);
+        assert_eq!(ev.kind, "scheduled_task_fired");
+        assert!(
+            ev.title.contains("every 5 minutes"),
+            "title should carry the human schedule, got {:?}",
+            ev.title
+        );
+        assert_eq!(ev.body, "run the deploy check");
+        assert_eq!(ev.meta["taskId"], "abc123");
+        assert_eq!(ev.meta["humanSchedule"], "every 5 minutes");
+        assert_eq!(ev.meta["nextFireAt"], "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn ci_guard_fix_ready_maps_fields() {
+        let event = xai_grok_tools::notification::CiGuardEvent::FixReady {
+            pr: 42,
+            branch: "grok-ci-fix/42-abc12345".into(),
+            diff_summary: " src/lib.rs | 2 +-".into(),
+        };
+        let ev = ci_guard_notification(&event);
+        assert_eq!(ev.kind, "ci_fix_ready");
+        assert!(ev.title.contains("#42"));
+        assert!(ev.body.contains("grok-ci-fix/42-abc12345"));
+        assert_eq!(ev.meta["pr"], 42);
+        assert_eq!(ev.meta["branch"], "grok-ci-fix/42-abc12345");
+    }
+
+    #[test]
+    fn ci_guard_cannot_autofix_and_blocked_carry_reason() {
+        let cannot = ci_guard_notification(
+            &xai_grok_tools::notification::CiGuardEvent::CannotAutofix {
+                pr: 7,
+                reason: "flaky".into(),
+            },
+        );
+        assert_eq!(cannot.kind, "ci_cannot_autofix");
+        assert!(cannot.body.contains("flaky"));
+
+        let blocked =
+            ci_guard_notification(&xai_grok_tools::notification::CiGuardEvent::Blocked {
+                pr: 7,
+                reason: "auth".into(),
+            });
+        assert_eq!(blocked.kind, "ci_blocked");
+        assert_eq!(blocked.meta["reason"], "auth");
     }
 
     fn make_task_snapshot(task_id: &str, kind: TaskKind) -> TaskSnapshot {

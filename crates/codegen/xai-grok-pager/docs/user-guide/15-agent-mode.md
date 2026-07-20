@@ -408,6 +408,47 @@ for await (const update of client.streamPrompt("List the files in this project")
 
 ---
 
+## CI Guardian (`ci_guard`)
+
+The CI Guardian watches a GitHub PR's CI and, on a **confident code failure**,
+prepares a fix on an isolated local branch for you to review — it **never pushes,
+merges, or deploys**. It builds on the scheduler (for polling) and the push
+notifications above (to alert you when a fix is ready or a failure needs you).
+
+You don't call it by hand — just ask the agent (e.g. "watch CI on PR #7 and fix
+it if it breaks"). The agent uses the `ci_guard` tool, which has these actions:
+
+| Action | What it does |
+|--------|--------------|
+| `start {repo, pr}` | Begin watching (polls every ~5 min via a durable scheduler task). Requires `gh` to be authenticated. |
+| `check {repo, pr}` | One poll tick — the watch's fired prompt calls this. On a *new* confident code failure it returns the logs + diagnosis. |
+| `commit_fix {repo, pr, head_sha, files}` | Apply the agent's edits on branch `grok-ci-fix/<pr>-<sha>` and commit locally. **Never pushes.** |
+| `rearm {repo, pr}` | Allow one more autonomous fix after you've reviewed the last one. |
+| `stop {repo, pr}` / `status` | Stop a watch (also automatic on PR merge/close) / list active watches. |
+
+### Safety model
+
+- **One autonomous fix per PR until you re-arm.** After a fix is prepared, the
+  guardian will not prepare another — even for a brand-new failing commit — until
+  you review it and run `rearm`. A new head SHA does **not** refill the budget.
+  This prevents an unattended fix→push→fail→fix loop.
+- **Never pushes.** The fix lands as a local commit on an isolated
+  `grok-ci-fix/<pr>-<sha>` branch. You review and push it yourself.
+- **Diagnosis-first.** Only a confident, localized code failure (a cited panic,
+  assertion, or compiler error) is auto-fixed. Flaky, infra, timeout, permission,
+  or ambiguous failures are reported for you to handle — never auto-patched.
+- **Fail-closed.** If `gh` auth or repo access is missing, the guardian pauses and
+  tells you, rather than silently treating it as "CI still pending".
+- **Clean-worktree only.** A fix is refused if the worktree has uncommitted
+  changes, and aborted if the PR head moved since diagnosis (a stale patch).
+
+### Notifications
+
+CI Guardian outcomes (`fix ready`, `cannot auto-fix`, `blocked`) ride the same
+delivery as scheduled tasks: in-band to a connected TUI/PWA, and (when Web Push
+is configured, see above) as a push notification so you're alerted even when the
+app is closed.
+
 ## Resources
 
 - [ACP Specification](https://agentclientprotocol.com/protocol/prompt-turn)

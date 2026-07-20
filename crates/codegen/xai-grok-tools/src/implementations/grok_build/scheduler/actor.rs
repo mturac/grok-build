@@ -301,6 +301,88 @@ mod tests {
         (SchedulerHandle(cmd_tx), cancel_token, notif_rx)
     }
 
+    /// End-to-end durability: a durable task persisted to disk by one "process"
+    /// must be reloaded from disk by a fresh `Resources` and re-announced by a
+    /// freshly-spawned `SchedulerActor`. This closes the gap where existing
+    /// tests only pre-seed an in-memory `Resources` in the same process — they
+    /// never exercise `save -> disk -> fresh load -> actor spawn`, which is the
+    /// exact path a `grok agent serve` restart + `session/load` reconnect relies
+    /// on.
+    #[tokio::test]
+    async fn durable_task_reannounced_after_fresh_on_disk_load() {
+        use crate::persistence::ResourcesPersistence;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("resources_state.json");
+
+        // --- Process 1: seed a durable, recurring task and persist to disk. ---
+        let seeded_id = {
+            let persistence = ResourcesPersistence::new(state_path.clone());
+            let mut resources = Resources::new();
+            resources.register_state::<SchedulerState>();
+            // recurring + durable so it is neither "missed" (one-shot, past due)
+            // nor filtered out; next fire is 300s out, expiry 7 days out.
+            let task = ScheduledTask::new(300, "durable ci watch".into(), true, true);
+            let id = task.id.clone();
+            resources
+                .get_or_default::<State<SchedulerState>>()
+                .tasks
+                .push(task);
+            persistence.save(&resources);
+            persistence.flush().await;
+            id
+        };
+        assert!(state_path.exists(), "state file must be written to disk");
+
+        // --- Process 2: fresh Resources, load from disk, spawn a fresh actor. ---
+        let mut resources2 = Resources::new();
+        resources2.register_state::<SchedulerState>();
+        let persistence2 = ResourcesPersistence::new(state_path.clone());
+        assert!(
+            persistence2.load(&mut resources2),
+            "load must succeed from the persisted file"
+        );
+        // The task survived the round-trip through disk.
+        assert_eq!(
+            resources2
+                .get::<State<SchedulerState>>()
+                .map(|s| s.tasks.len())
+                .unwrap_or(0),
+            1,
+            "durable task must be present after fresh on-disk load"
+        );
+
+        let shared = Arc::new(Mutex::new(resources2));
+        let (notif_handle, mut notif_rx) = ToolNotificationHandle::channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let actor = SchedulerActor {
+            resources: shared,
+            notification_handle: notif_handle,
+            cmd_rx,
+            cancel_token: cancel_token.clone(),
+        };
+        tokio::spawn(actor.run());
+
+        // The freshly-spawned actor must re-announce the persisted task so a
+        // reconnecting client can rebuild its tasks pane.
+        let notif = tokio::time::timeout(std::time::Duration::from_secs(5), notif_rx.recv())
+            .await
+            .expect("actor should announce a task within 5s")
+            .expect("notification channel must stay open");
+        match notif {
+            ToolNotification::ScheduledTaskCreated(created) => {
+                assert_eq!(
+                    created.task_id, seeded_id,
+                    "the re-announced task must be the persisted one"
+                );
+            }
+            other => panic!("expected ScheduledTaskCreated, got {other:?}"),
+        }
+
+        cancel_token.cancel();
+    }
+
     #[tokio::test]
     async fn create_and_list_task() {
         let (handle, cancel, _notif_rx) = make_test_actor();

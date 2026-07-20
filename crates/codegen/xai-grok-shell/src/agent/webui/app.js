@@ -52,6 +52,8 @@
     preHelloFailures: 0,
     agentInstanceId: null,
     binaryVersion: null,
+    // Web Push is set up once per page load after the first session is ready.
+    pushSetupDone: false,
   };
 
   const MAX_PRE_HELLO_FAILURES = 2;
@@ -460,6 +462,88 @@
       "connected",
     );
     enableInput();
+    // Opportunistically register for Web Push so the phone gets notified about
+    // background agent activity (scheduled tasks, etc.) when the PWA is closed.
+    // Fire-and-forget: never block or fail the session on push setup.
+    setupPush();
+  }
+
+  // ---------------------------------------------------------------------
+  // Web Push registration
+  // ---------------------------------------------------------------------
+
+  /** Decode a base64url (no padding) VAPID key into the Uint8Array that
+   * `PushManager.subscribe` expects as `applicationServerKey`. */
+  function urlBase64ToUint8Array(base64UrlNoPad) {
+    const padding = "=".repeat((4 - (base64UrlNoPad.length % 4)) % 4);
+    const base64 = (base64UrlNoPad + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(base64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  async function setupPush() {
+    if (state.pushSetupDone) return;
+    if (
+      !("serviceWorker" in navigator) ||
+      !("PushManager" in window) ||
+      !("Notification" in window)
+    ) {
+      return; // browser can't do Web Push (e.g. iOS before add-to-home-screen)
+    }
+    // Mark done up front so overlapping onSessionReady calls don't double-run;
+    // reset on failure below so a later session-ready can retry.
+    state.pushSetupDone = true;
+    try {
+      if (Notification.permission === "denied") {
+        // Respect the user's block, but allow a later attempt (a future
+        // session-ready after they change the browser setting) to retry.
+        state.pushSetupDone = false;
+        return;
+      }
+      if (Notification.permission === "default") {
+        const perm = await Notification.requestPermission();
+        if (perm !== "granted") {
+          state.pushSetupDone = false;
+          return;
+        }
+      }
+      // Send the secret in the Authorization header, NOT as a ?server-key=
+      // query param: unlike the WS upgrade, these are plain HTTP GET/POST whose
+      // full URL (secret included) could land in a reverse-proxy access log or
+      // a Referer header. validate_auth checks the Bearer header first, so this
+      // keeps the secret out of URLs entirely. (Same-origin fetch, so it was
+      // never in browser history, but access logs are the real exposure.)
+      const authHeaders = { authorization: `Bearer ${state.secret}` };
+      const reg = await navigator.serviceWorker.ready;
+      const keyResp = await fetch("/push/vapid-public-key", { headers: authHeaders });
+      if (!keyResp.ok) {
+        state.pushSetupDone = false;
+        return;
+      }
+      const { publicKey } = await keyResp.json();
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+      }
+      const keys = sub.toJSON().keys || {};
+      await fetch("/push/subscribe", {
+        method: "POST",
+        headers: { ...authHeaders, "content-type": "application/json" },
+        body: JSON.stringify({
+          endpoint: sub.endpoint,
+          p256dh: keys.p256dh || "",
+          auth: keys.auth || "",
+        }),
+      });
+    } catch (_err) {
+      // Push is a best-effort enhancement — never surface it as a chat error.
+      state.pushSetupDone = false;
+    }
   }
 
   // ---------------------------------------------------------------------

@@ -94,6 +94,7 @@ pub enum ToolInput {
     SchedulerCreate(crate::implementations::grok_build::scheduler::create::SchedulerCreateInput),
     SchedulerDelete(crate::implementations::grok_build::scheduler::delete::SchedulerDeleteInput),
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListInput),
+    CiGuard(crate::implementations::grok_build::ci_guard::tool::CiGuardInput),
     UpdateGoal(UpdateGoalInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
