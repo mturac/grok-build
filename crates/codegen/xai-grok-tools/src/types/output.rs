@@ -647,6 +647,7 @@ pub enum ToolOutput {
     SchedulerDelete(crate::implementations::grok_build::scheduler::delete::SchedulerDeleteOutput),
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListOutput),
     CiGuard(crate::implementations::grok_build::ci_guard::tool::CiGuardOutput),
+    Orchestrate(crate::implementations::grok_build::orchestrate::types::OrchestrateOutput),
     UpdateGoal(crate::implementations::grok_build::update_goal::UpdateGoalOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
@@ -976,6 +977,7 @@ impl ToolOutput {
                 }
             }
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
+            ToolOutput::Orchestrate(o) => o.result.clone(),
             ToolOutput::CiGuard(o) => {
                 // Include the structured data (headSha/logsTail/failingTests) so
                 // the agent has what it needs to produce a fix and call commit_fix.

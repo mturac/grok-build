@@ -449,6 +449,33 @@ delivery as scheduled tasks: in-band to a connected TUI/PWA, and (when Web Push
 is configured, see above) as a push notification so you're alerted even when the
 app is closed.
 
+## Orchestrate (deterministic fan-out)
+
+`orchestrate` runs several sub-agents in parallel in one deterministic step: give
+it 2–16 `subtasks`, it spawns them all at once over the same sub-agent machinery
+as `task`, waits for every one (a barrier), and gathers the results. Unlike
+free-form `task`/`wait` calls (where the model decides the shape as it goes), the
+fan-out is fixed the moment `orchestrate` is called.
+
+| Field | Meaning |
+|-------|---------|
+| `subtasks` | 2–16 items, each a `prompt` (+ optional `label`). Run in parallel; a failed sub-task is **skipped**, not fatal. |
+| `synthesis_prompt` (optional) | A final sub-agent merges the surviving outputs under this prompt and its output is returned. Omit it to get the labeled raw outputs back. |
+| `mode: "verify"` (optional) | Each output is checked by an independent verifier sub-agent; only **CONFIRMED** ones are kept before synthesis. |
+| `subagent_type` (optional) | Worker sub-agent type (validated up front; unknown types list the available ones). |
+
+The result reports `subtaskCount`, `succeeded`, `skipped`, and (in verify mode)
+`verified` so the fan-out's cost and outcome are visible.
+
+**When to use it:** independent pieces you want done in parallel (e.g. review N
+files, research M angles), or **N attempts adversarially verified** before you
+trust the answer. For a single sub-agent, use `task`.
+
+**Safety:** sub-agents inherit the parent's capabilities — `orchestrate` grants
+nothing new (no extra push/exec/fs). Nesting is capped (an orchestrated sub-agent
+cannot fan out again past the depth limit), and the shared coordinator's
+running-sub-agent limit bounds concurrency.
+
 ## Resources
 
 - [ACP Specification](https://agentclientprotocol.com/protocol/prompt-turn)
