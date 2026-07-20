@@ -1,3 +1,4 @@
+pub mod ece;
 pub mod fanout;
 pub mod store;
 pub mod vapid;
