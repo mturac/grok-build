@@ -187,6 +187,12 @@
       } else if (li) {
         if (!inList) { html += "<ul>"; inList = true; }
         html += `<li>${li[1]}</li>`;
+      } else if (line.indexOf(marker) !== -1) {
+        // A code-block placeholder line: emit it bare (never wrap a block-level
+        // code <div> in a <p>, which the browser would auto-close into an empty
+        // <p></p> and add stray vertical space).
+        if (inList) { html += "</ul>"; inList = false; }
+        html += line;
       } else {
         if (inList) { html += "</ul>"; inList = false; }
         html += line.trim() === "" ? "" : `<p>${line}</p>`;
@@ -771,7 +777,7 @@
         else if (line.startsWith("@@")) cls = "hunk";
         return `<span class="dl ${cls}">${escapeHtml(line)}</span>`;
       })
-      .join("\n");
+      .join("");
   }
 
   function toolCardEl(toolCallId) {

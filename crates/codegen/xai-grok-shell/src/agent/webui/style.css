@@ -450,6 +450,8 @@ code.inline {
 
 /* Fenced code blocks + copy */
 .code-wrap { position: relative; margin: 0.5em 0; }
+/* Room for the absolutely-positioned copy button so it never overlaps line 1. */
+.code-wrap pre.code { padding-top: 1.9em; }
 pre.code {
   background: var(--code-bg);
   border: 1px solid var(--border);
@@ -518,13 +520,18 @@ pre.code {
 .tool-detail.diff {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.8rem;
-  white-space: pre;
   overflow-x: auto;
   background: var(--code-bg);
   border-radius: 8px;
   padding: 8px;
 }
-.dl { display: block; }
+/* Each diff line is its own block AND preserves its internal leading spaces.
+   `white-space: pre` lives on the line (not the container) so the block stacking
+   doesn't introduce blank lines between rows. */
+.dl {
+  display: block;
+  white-space: pre;
+}
 .dl.add { color: var(--add); }
 .dl.del { color: var(--del); }
 .dl.hunk { color: var(--text-dim); }
