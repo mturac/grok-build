@@ -194,4 +194,24 @@ mod tests {
             "sw.js must handle notification clicks"
         );
     }
+
+    /// The enriched PWA must ship: a Markdown renderer, tool-call cards, in-band
+    /// x.ai/* event cards, and a theme override. Guards against a refactor
+    /// dropping any of the enrichment from the shipped assets.
+    #[test]
+    fn pwa_assets_contain_enrichments() {
+        assert!(APP_JS.contains("function renderMarkdown"), "markdown renderer");
+        assert!(APP_JS.contains("tool-card"), "tool-call cards");
+        assert!(
+            APP_JS.contains("renderEventCard") && APP_JS.contains("x.ai/"),
+            "in-band x.ai/* event cards"
+        );
+        assert!(APP_JS.contains("initTheme"), "theme toggle");
+        assert!(
+            STYLE_CSS.contains("[data-theme=\"light\"]"),
+            "css must define a light theme override"
+        );
+        assert!(STYLE_CSS.contains(".tool-card"), "css must style tool cards");
+        assert!(STYLE_CSS.contains(".event-card"), "css must style event cards");
+    }
 }

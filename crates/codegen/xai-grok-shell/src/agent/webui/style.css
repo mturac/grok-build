@@ -1,7 +1,7 @@
 /* Grok Remote — mobile-first dark chat UI. */
 
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
   --bg: #0b0d12;
   --bg-raised: #12151d;
   --border: #232838;
@@ -10,6 +10,44 @@
   --accent: #3ddc97;
   --danger: #e5534b;
   --warn: #d8a53d;
+  --code-bg: #0a0c11;
+  --add: #2ea043;
+  --del: #e5534b;
+}
+
+/* Light palette — used when the OS is light AND the user hasn't overridden,
+   or when they explicitly pick light via the theme toggle. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --bg: #f6f7f9;
+    --bg-raised: #ffffff;
+    --border: #dfe2ea;
+    --text: #1c2230;
+    --text-dim: #5b6172;
+    --accent: #12a869;
+    --code-bg: #f0f2f6;
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --bg-raised: #ffffff;
+  --border: #dfe2ea;
+  --text: #1c2230;
+  --text-dim: #5b6172;
+  --accent: #12a869;
+  --code-bg: #f0f2f6;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0d12;
+  --bg-raised: #12151d;
+  --border: #232838;
+  --text: #e6e8ee;
+  --text-dim: #8b93a7;
+  --accent: #3ddc97;
+  --code-bg: #0a0c11;
 }
 
 * {
@@ -385,3 +423,164 @@ body {
 .hidden {
   display: none !important;
 }
+
+/* ---------- Enriched rendering ---------- */
+
+/* Markdown inside assistant/thought messages */
+.msg-assistant p,
+.thought-body p { margin: 0 0 0.5em; }
+.msg-assistant p:last-child,
+.thought-body p:last-child { margin-bottom: 0; }
+.msg-assistant h1, .msg-assistant h2, .msg-assistant h3, .msg-assistant h4 {
+  margin: 0.6em 0 0.3em; line-height: 1.25;
+}
+.msg-assistant h1 { font-size: 1.25rem; }
+.msg-assistant h2 { font-size: 1.15rem; }
+.msg-assistant h3 { font-size: 1.05rem; }
+.msg-assistant ul, .thought-body ul { margin: 0.3em 0; padding-left: 1.25em; }
+.msg-assistant a { color: var(--accent); }
+code.inline {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05em 0.35em;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Fenced code blocks + copy */
+.code-wrap { position: relative; margin: 0.5em 0; }
+/* Room for the absolutely-positioned copy button so it never overlaps line 1. */
+.code-wrap pre.code { padding-top: 1.9em; }
+pre.code {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.7em 0.8em;
+  margin: 0;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0.85;
+}
+.copy-btn:active { transform: scale(0.96); }
+
+/* Tool-call cards */
+.tool-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-dim);
+  border-radius: 10px;
+  margin: 6px 0;
+  overflow: hidden;
+}
+.tool-card.status-completed { border-left-color: var(--accent); }
+.tool-card.status-in_progress,
+.tool-card.status-pending { border-left-color: var(--warn); }
+.tool-card.status-failed { border-left-color: var(--danger); }
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.tool-head.expandable { cursor: pointer; }
+.tool-head.expandable::after { content: "▾"; color: var(--text-dim); margin-left: auto; }
+.tool-icon { flex: none; }
+.tool-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-badge {
+  flex: none;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.status-completed .tool-badge { color: var(--accent); }
+.status-failed .tool-badge { color: var(--danger); }
+.tool-detail { padding: 0 10px 10px; }
+.tool-detail.hidden { display: none; }
+
+/* Diff view */
+.tool-detail.diff {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  overflow-x: auto;
+  background: var(--code-bg);
+  border-radius: 8px;
+  padding: 8px;
+}
+/* Each diff line is its own block AND preserves its internal leading spaces.
+   `white-space: pre` lives on the line (not the container) so the block stacking
+   doesn't introduce blank lines between rows. */
+.dl {
+  display: block;
+  white-space: pre;
+}
+.dl.add { color: var(--add); }
+.dl.del { color: var(--del); }
+.dl.hunk { color: var(--text-dim); }
+
+/* Thought (collapsible) */
+details.msg-thought { background: transparent; border: 1px dashed var(--border); border-radius: 10px; padding: 4px 10px; }
+details.msg-thought > summary { color: var(--text-dim); cursor: pointer; font-size: 0.85rem; list-style: none; }
+details.msg-thought > summary::-webkit-details-marker { display: none; }
+.thought-body { color: var(--text-dim); font-size: 0.9rem; margin-top: 6px; }
+
+/* In-band event cards */
+.event-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+.event-icon { font-size: 1.1rem; line-height: 1.3; }
+.event-title { font-weight: 600; }
+.event-body { color: var(--text-dim); font-size: 0.9rem; white-space: pre-wrap; margin-top: 2px; }
+
+/* Toast */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%) translateY(12px);
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 50;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Session label is tappable (copy) */
+#session-label { cursor: pointer; }
+
+/* Mobile safe areas */
+#header { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
+#composer { padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
