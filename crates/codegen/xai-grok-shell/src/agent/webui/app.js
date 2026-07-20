@@ -76,6 +76,43 @@
     qs("status-dot").className = "dot dot-" + dotClass;
   }
 
+  // Transient toast (connection transitions, copy confirmations, ...).
+  let toastTimer = null;
+  function showToast(text) {
+    let t = qs("toast");
+    if (!t) {
+      t = document.createElement("div");
+      t.id = "toast";
+      document.body.appendChild(t);
+    }
+    t.textContent = text;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+  }
+
+  // Dark/light theme: follow the OS by default; a toggle persists an override.
+  const THEME_KEY = "grok-remote-theme";
+  function applyTheme(theme) {
+    if (theme === "dark" || theme === "light") {
+      document.documentElement.setAttribute("data-theme", theme);
+    } else {
+      document.documentElement.removeAttribute("data-theme"); // follow OS
+    }
+  }
+  function initTheme() {
+    applyTheme(localStorage.getItem(THEME_KEY));
+    const btn = qs("theme-btn");
+    if (btn) {
+      btn.addEventListener("click", () => {
+        const cur = document.documentElement.getAttribute("data-theme");
+        const next = cur === "dark" ? "light" : "dark";
+        localStorage.setItem(THEME_KEY, next);
+        applyTheme(next);
+      });
+    }
+  }
+
   function showBanner(text) {
     const b = qs("version-warning");
     b.textContent = text;
@@ -95,10 +132,101 @@
     m.scrollTop = m.scrollHeight;
   }
 
+  // --- Markdown (tiny, dependency-free, escape-first) ---
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  // Render a small, safe subset of Markdown to HTML. Everything is escaped
+  // first, then only our own known tags are (re)introduced — model/tool text
+  // can never inject markup.
+  function renderMarkdown(raw) {
+    const src = String(raw == null ? "" : raw);
+    const codeBlocks = [];
+    // Per-render, unguessable placeholder wrapped in private-use codepoints
+    // (never present in normal text; survive escapeHtml untouched) so untrusted
+    // body text cannot forge a placeholder and displace/repeat a code block.
+    const marker = "\uE000" + Math.random().toString(36).slice(2) + "\uE000";
+    // 1. Pull fenced code blocks out first (so their contents aren't touched).
+    let work = src.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
+      const idx = codeBlocks.length;
+      codeBlocks.push(
+        `<div class="code-wrap"><button class="copy-btn" data-copy type="button">copy</button>` +
+          `<pre class="code${lang ? " lang-" + escapeHtml(lang) : ""}"><code>${escapeHtml(
+            code.replace(/\n$/, ""),
+          )}</code></pre></div>`,
+      );
+      return marker + idx + marker;
+    });
+    work = escapeHtml(work);
+    // 2. Inline + block markdown on the escaped text.
+    work = work
+      .replace(/`([^`]+)`/g, (_m, c) => `<code class="inline">${c}</code>`)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(
+        /\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+        '<a href="$2" target="_blank" rel="noreferrer noopener">$1</a>',
+      );
+    // Headings + lists, line by line.
+    const lines = work.split("\n");
+    let html = "";
+    let inList = false;
+    for (const line of lines) {
+      const h = line.match(/^(#{1,4})\s+(.*)$/);
+      const li = line.match(/^\s*[-*]\s+(.*)$/);
+      if (h) {
+        if (inList) { html += "</ul>"; inList = false; }
+        const level = h[1].length;
+        html += `<h${level}>${h[2]}</h${level}>`;
+      } else if (li) {
+        if (!inList) { html += "<ul>"; inList = true; }
+        html += `<li>${li[1]}</li>`;
+      } else {
+        if (inList) { html += "</ul>"; inList = false; }
+        html += line.trim() === "" ? "" : `<p>${line}</p>`;
+      }
+    }
+    if (inList) html += "</ul>";
+    // 3. Restore code blocks.
+    codeBlocks.forEach((block, i) => {
+      html = html.split(marker + i + marker).join(block);
+    });
+    return html;
+  }
+
+  // Wire copy buttons inside a freshly-rendered element.
+  function wireCopyButtons(root) {
+    root.querySelectorAll("[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const pre = btn.parentElement.querySelector("pre, code");
+        const text = pre ? pre.textContent : "";
+        if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+        const old = btn.textContent;
+        btn.textContent = "copied";
+        setTimeout(() => (btn.textContent = old), 1200);
+      });
+    });
+  }
+
+  // Roles that render Markdown; others stay plain text.
+  const MARKDOWN_ROLES = { assistant: true, thought: true };
+
   function appendMessage(role, text) {
     const el = document.createElement("div");
     el.className = "msg msg-" + role;
-    el.textContent = text;
+    if (MARKDOWN_ROLES[role]) {
+      el.dataset.raw = text || "";
+      el.innerHTML = renderMarkdown(el.dataset.raw);
+      wireCopyButtons(el);
+    } else {
+      el.textContent = text;
+    }
     qs("messages").appendChild(el);
     scrollToBottom();
     return el;
@@ -229,6 +357,7 @@
 
   function scheduleReconnect() {
     clearTimeout(state.reconnectTimer);
+    showToast(`Reconnecting in ${Math.round(state.reconnectDelay / 1000)}s…`);
     state.reconnectTimer = setTimeout(() => {
       connect(state.secret);
     }, state.reconnectDelay);
@@ -311,6 +440,13 @@
     }
 
     if (msg.method !== undefined) {
+      // x.ai/* NOTIFICATIONS (no id): CI Guardian / scheduled-task events.
+      // Render an event card in the stream; never reply method-not-found to a
+      // notification.
+      if (msg.id === undefined && msg.method.indexOf("x.ai/") === 0) {
+        renderEventCard(msg.method, msg.params);
+        return;
+      }
       // An agent->client request/notification this MVP client doesn't
       // implement (e.g. fs/*, terminal/*, x.ai/*). We advertised no fs/
       // terminal capabilities, so the agent shouldn't normally call those,
@@ -556,24 +692,41 @@
     return ""; // images/audio/resources: not rendered in this MVP client
   }
 
+  // Accumulate raw text on the element and re-render Markdown progressively.
+  function appendChunkTo(el, text) {
+    el.dataset.raw = (el.dataset.raw || "") + text;
+    el.innerHTML = renderMarkdown(el.dataset.raw);
+    wireCopyButtons(el);
+    scrollToBottom();
+  }
+
   function appendAssistantChunk(content) {
     const text = contentText(content);
     if (!text) return;
     if (!state.currentAssistantEl) {
       state.currentAssistantEl = appendMessage("assistant", "");
     }
-    state.currentAssistantEl.textContent += text;
-    scrollToBottom();
+    appendChunkTo(state.currentAssistantEl, text);
   }
 
   function appendThoughtChunk(content) {
     const text = contentText(content);
     if (!text) return;
     if (!state.currentThoughtEl) {
-      state.currentThoughtEl = appendMessage("thought", "");
+      // A collapsible "thinking" block (collapsed by default, muted).
+      const wrap = document.createElement("details");
+      wrap.className = "msg msg-thought";
+      const summary = document.createElement("summary");
+      summary.textContent = "\u{1F4AD} thinking";
+      const body = document.createElement("div");
+      body.className = "thought-body";
+      wrap.appendChild(summary);
+      wrap.appendChild(body);
+      qs("messages").appendChild(wrap);
+      state.currentThoughtEl = body;
+      scrollToBottom();
     }
-    state.currentThoughtEl.textContent += text;
-    scrollToBottom();
+    appendChunkTo(state.currentThoughtEl, text);
   }
 
   const TOOL_ICONS = {
@@ -589,39 +742,152 @@
     other: "\u{1F527}",
   };
 
-  function toolLineEl(toolCallId) {
+  // Extract any text detail (e.g. a diff) from a tool update's content array.
+  function toolDetailText(update) {
+    const content = update && update.content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .map((c) => {
+        if (!c) return "";
+        if (typeof c.text === "string") return c.text;
+        if (c.content && typeof c.content.text === "string") return c.content.text;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  function looksLikeDiff(text) {
+    return /^[+-] /m.test(text) || /^@@ /m.test(text);
+  }
+
+  function renderDiff(text) {
+    return text
+      .split("\n")
+      .map((line) => {
+        let cls = "";
+        if (line.startsWith("+")) cls = "add";
+        else if (line.startsWith("-")) cls = "del";
+        else if (line.startsWith("@@")) cls = "hunk";
+        return `<span class="dl ${cls}">${escapeHtml(line)}</span>`;
+      })
+      .join("\n");
+  }
+
+  function toolCardEl(toolCallId) {
     let el = state.toolEls.get(toolCallId);
     if (!el) {
       el = document.createElement("div");
-      el.className = "tool-line";
+      el.className = "tool-card";
+      el.innerHTML =
+        '<div class="tool-head"><span class="tool-icon"></span>' +
+        '<span class="tool-title"></span><span class="tool-badge"></span></div>' +
+        '<div class="tool-detail hidden"></div>';
+      el.querySelector(".tool-head").addEventListener("click", () => {
+        const d = el.querySelector(".tool-detail");
+        if (d.textContent.trim() || d.children.length) d.classList.toggle("hidden");
+      });
       qs("messages").appendChild(el);
       state.toolEls.set(toolCallId, el);
     }
     return el;
   }
 
-  function renderToolLine(el, title, kind, status) {
+  function renderToolCard(el, title, kind, status, detail) {
     const icon = TOOL_ICONS[kind] || TOOL_ICONS.other;
-    const statusLabel = status ? ` — ${status}` : "";
-    el.textContent = `${icon} ${title || "Tool call"}${statusLabel}`;
-    el.className = "tool-line status-" + (status || "pending");
+    el.className = "tool-card status-" + (status || "pending");
+    el.querySelector(".tool-icon").textContent = icon;
+    el.querySelector(".tool-title").textContent = title || "Tool call";
+    el.querySelector(".tool-badge").textContent = status || "pending";
+    if (detail && detail.trim()) {
+      const d = el.querySelector(".tool-detail");
+      if (looksLikeDiff(detail)) {
+        d.className = "tool-detail diff";
+        d.innerHTML = renderDiff(detail);
+      } else {
+        d.className = "tool-detail";
+        d.innerHTML = `<pre class="code"><code>${escapeHtml(detail)}</code></pre>`;
+      }
+      el.querySelector(".tool-head").classList.add("expandable");
+    }
     scrollToBottom();
   }
 
   function handleToolCall(update) {
-    const el = toolLineEl(update.toolCallId);
+    const el = toolCardEl(update.toolCallId);
     el.dataset.title = update.title || "";
     el.dataset.kind = update.kind || "other";
-    renderToolLine(el, update.title, update.kind, update.status);
+    renderToolCard(el, update.title, update.kind, update.status, toolDetailText(update));
   }
 
   function handleToolCallUpdate(update) {
-    const el = toolLineEl(update.toolCallId);
+    const el = toolCardEl(update.toolCallId);
     const title = update.title !== undefined ? update.title : el.dataset.title;
     const kind = update.kind !== undefined ? update.kind : el.dataset.kind;
     if (update.title !== undefined) el.dataset.title = update.title;
     if (update.kind !== undefined) el.dataset.kind = update.kind;
-    renderToolLine(el, title, kind, update.status);
+    renderToolCard(el, title, kind, update.status, toolDetailText(update));
+  }
+
+  // Render an in-band event (CI Guardian / scheduled task) as a distinct card.
+  // Reads payload fields defensively — an unexpected shape falls back to a
+  // generic card rather than crashing the renderer.
+  function renderEventCard(method, params) {
+    const p = params || {};
+    let icon = "\u{1F514}";
+    let title = method;
+    let body = "";
+    if (method.indexOf("scheduled_task_fired") >= 0) {
+      icon = "⏰";
+      title = "Scheduled task fired";
+      body = p.prompt || p.humanSchedule || "";
+    } else if (method.indexOf("scheduled_task_created") >= 0) {
+      icon = "⏰";
+      title = "Scheduled task created";
+      body = p.humanSchedule || "";
+    } else if (method.indexOf("ci_guard_event") >= 0) {
+      const key = Object.keys(p)[0] || "";
+      const d = p[key] || {};
+      const pr = d.pr !== undefined ? ` — PR #${d.pr}` : "";
+      if (key === "FixReady") {
+        icon = "✅";
+        title = `CI fix ready${pr}`;
+        body = `branch ${d.branch || "?"}\n${d.diffSummary || d.diff_summary || ""}`;
+      } else if (key === "CannotAutofix") {
+        icon = "⚠️";
+        title = `CI: cannot auto-fix${pr}`;
+        body = d.reason || "";
+      } else if (key === "Blocked") {
+        icon = "\u{1F6AB}";
+        title = `CI Guardian blocked${pr}`;
+        body = d.reason || "";
+      } else if (key === "WatchStarted") {
+        icon = "\u{1F440}";
+        title = `Watching${pr}`;
+        body = d.repo || "";
+      } else if (key === "JobState") {
+        icon = "⚙️";
+        title = `CI job: ${d.state || "?"}${pr}`;
+      } else {
+        title = "CI Guardian event";
+        body = JSON.stringify(p);
+      }
+    }
+    const el = document.createElement("div");
+    el.className = "event-card";
+    el.innerHTML =
+      '<span class="event-icon"></span><div class="event-text">' +
+      '<div class="event-title"></div><div class="event-body"></div></div>';
+    el.querySelector(".event-icon").textContent = icon;
+    el.querySelector(".event-title").textContent = title;
+    const b = el.querySelector(".event-body");
+    if (body) b.textContent = body;
+    else b.remove();
+    qs("messages").appendChild(el);
+    // A new event breaks any in-progress assistant/thought accumulation.
+    state.currentAssistantEl = null;
+    state.currentThoughtEl = null;
+    scrollToBottom();
   }
 
   function handleSessionUpdate(params) {
@@ -751,6 +1017,14 @@
   // ---------------------------------------------------------------------
 
   function init() {
+    initTheme();
+    // Tap the session label to copy the short session id.
+    qs("session-label").addEventListener("click", () => {
+      if (!state.sessionId) return;
+      const short = shortId(state.sessionId);
+      if (navigator.clipboard) navigator.clipboard.writeText(state.sessionId).catch(() => {});
+      showToast(`Copied session id ${short}`);
+    });
     qs("send-btn").addEventListener("click", submitInput);
     qs("input").addEventListener("input", (e) => autoGrow(e.target));
     qs("input").addEventListener("keydown", (e) => {
