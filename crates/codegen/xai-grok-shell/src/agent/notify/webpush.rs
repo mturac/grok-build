@@ -1,21 +1,23 @@
-//! Web Push delivery sink (payload-less MVP).
+//! Web Push delivery sink.
 //!
 //! Implements [`Notifier`] by POSTing to every stored push subscription's
-//! endpoint with a VAPID `Authorization` header. This MVP sends NO encrypted
-//! payload (RFC 8291 `aes128gcm` is a follow-up): a payload-less push simply
-//! wakes the PWA service worker, which shows a static line and fetches details
-//! over `/ws`. Endpoints the push service reports as gone (HTTP 404/410) are
-//! pruned from the store.
+//! endpoint with a VAPID `Authorization` header and an RFC 8291 `aes128gcm`
+//! encrypted payload carrying the event's `{title, body}` — so the PWA service
+//! worker shows the actual notification text (e.g. "CI fix ready — branch X")
+//! even when the app is closed. Endpoints the push service reports as gone
+//! (HTTP 404/410) are pruned from the store.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH};
 
 use super::store::PushStore;
 use super::vapid::VapidKeys;
-use super::{AgentNotification, Notifier};
+use super::{AgentNotification, Notifier, ece};
 
 /// TTL (seconds) a push service holds an undelivered message. Short: these are
 /// "wake up and refresh" pings, not durable messages.
@@ -62,13 +64,31 @@ fn endpoint_origin(endpoint: &str) -> Option<String> {
 
 #[async_trait]
 impl Notifier for WebPushNotifier {
-    async fn notify(&self, _event: &AgentNotification) {
-        // Payload-less: the event content is intentionally not sent. The SW
-        // renders a generic line and the PWA pulls specifics over the WS.
+    async fn notify(&self, event: &AgentNotification) {
+        // The encrypted payload the service worker renders directly.
+        let payload = serde_json::json!({ "title": event.title, "body": event.body }).to_string();
         for sub in self.store.all().await {
             let Some(aud) = endpoint_origin(&sub.endpoint) else {
                 tracing::warn!("skipping push to malformed endpoint {:?}", sub.endpoint);
                 continue;
+            };
+            // Decode the subscription's client keys (base64url, no padding).
+            let (ua_public, auth_secret) = match (
+                URL_SAFE_NO_PAD.decode(sub.p256dh.as_bytes()),
+                URL_SAFE_NO_PAD.decode(sub.auth.as_bytes()),
+            ) {
+                (Ok(p), Ok(a)) => (p, a),
+                _ => {
+                    tracing::warn!("skipping push to {:?}: undecodable subscription keys", sub.endpoint);
+                    continue;
+                }
+            };
+            let body = match ece::encrypt(payload.as_bytes(), &ua_public, &auth_secret) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("push payload encryption failed for {:?}: {e}", sub.endpoint);
+                    continue;
+                }
             };
             let auth = match self.vapid.sign_auth_header(&aud, &self.subject) {
                 Ok(a) => a,
@@ -82,7 +102,9 @@ impl Notifier for WebPushNotifier {
                 .post(&sub.endpoint)
                 .header(AUTHORIZATION, auth)
                 .header("TTL", PUSH_TTL_SECONDS.to_string())
-                .header(CONTENT_LENGTH, "0")
+                .header("Content-Encoding", "aes128gcm")
+                .header(CONTENT_LENGTH, body.len().to_string())
+                .body(body)
                 .send()
                 .await;
             match resp {
@@ -129,11 +151,18 @@ mod tests {
         assert_eq!(endpoint_origin("not a url"), None);
     }
 
+    /// A subscription with a real, decodable p256dh (65-byte uncompressed P-256
+    /// point) and a 16-byte auth secret so `ece::encrypt` succeeds.
     fn sub(endpoint: String) -> PushSubscription {
+        use p256::elliptic_curve::rand_core::OsRng;
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        let ua_public = p256::SecretKey::random(&mut OsRng)
+            .public_key()
+            .to_encoded_point(false);
         PushSubscription {
             endpoint,
-            p256dh: "k".into(),
-            auth: "a".into(),
+            p256dh: URL_SAFE_NO_PAD.encode(ua_public.as_bytes()),
+            auth: URL_SAFE_NO_PAD.encode([7u8; 16]),
         }
     }
 
