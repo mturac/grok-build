@@ -5,4 +5,5 @@
 //! A thin, deterministic layer over `Task`'s spawn path — the fan-out shape is
 //! fixed at call time. See `docs/superpowers/specs/2026-07-20-orchestrate-fanout-verify-design.md`.
 
+pub mod fanout;
 pub mod types;
