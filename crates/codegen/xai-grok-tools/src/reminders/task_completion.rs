@@ -597,6 +597,7 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::SchedulerList(_)
         | ToolOutput::CiGuard(_)
         | ToolOutput::Orchestrate(_)
+        | ToolOutput::Artifact(_)
         | ToolOutput::UpdateGoal(_)
         | ToolOutput::ImageGen(_)
         | ToolOutput::ImageToVideo(_)

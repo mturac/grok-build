@@ -96,6 +96,7 @@ pub enum ToolInput {
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListInput),
     CiGuard(crate::implementations::grok_build::ci_guard::tool::CiGuardInput),
     Orchestrate(crate::implementations::grok_build::orchestrate::types::OrchestrateInput),
+    Artifact(crate::implementations::grok_build::artifact::types::ArtifactInput),
     UpdateGoal(UpdateGoalInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),

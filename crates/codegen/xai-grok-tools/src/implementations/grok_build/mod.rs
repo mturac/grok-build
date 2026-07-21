@@ -8,6 +8,7 @@
 //! The [`register_all()`] function is the single entry-point for wiring up
 //! the standard toolset. It inserts shared resources (`Terminal`,
 //! `AvailableSkills`, `BashParams`) and registers every built-in tool.
+pub mod artifact;
 pub mod ask_user_question;
 pub mod bash;
 pub mod ci_guard;
@@ -34,6 +35,10 @@ pub mod update_goal;
 pub mod video_gen;
 pub mod web_fetch;
 pub mod web_search;
+pub use artifact::{
+    ARTIFACT_TOOL_NAME, ArtifactService, ArtifactStore, ArtifactTool, artifact_service,
+    set_artifact_service,
+};
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
