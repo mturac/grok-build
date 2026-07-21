@@ -284,19 +284,45 @@ fn parse_goal_budget(trimmed: &str) -> (String, Option<i64>) {
     (trimmed.to_string(), None)
 }
 
-const PROMPT_COMMANDS: &[BuiltinCommand] = &[BuiltinCommand {
-    name: "loop",
-    description: "Run a prompt on a recurring interval",
-    argument_hint: Some("[interval] <prompt>"),
-    aliases: &[],
-    gate: BuiltinGate::Scheduler,
-    // INVARIANT: resolve() short-circuits any prompt-only command via a
-    // PROMPT_COMMANDS lookup before reaching this closure. If a future
-    // refactor changes that ordering this `unreachable!` will surface
-    // the bug loudly instead of silently dispatching to ContextInfo
-    // (which is what the previous sentinel did).
-    resolve: |_| unreachable!("/loop is dispatched via the PROMPT_COMMANDS path in resolve()"),
-}];
+const PROMPT_COMMANDS: &[BuiltinCommand] = &[
+    BuiltinCommand {
+        name: "loop",
+        description: "Run a prompt on a recurring interval",
+        argument_hint: Some("[interval] <prompt>"),
+        aliases: &[],
+        gate: BuiltinGate::Scheduler,
+        // INVARIANT: resolve() short-circuits any prompt-only command via a
+        // PROMPT_COMMANDS lookup before reaching this closure. If a future
+        // refactor changes that ordering this `unreachable!` will surface
+        // the bug loudly instead of silently dispatching to ContextInfo
+        // (which is what the previous sentinel did).
+        resolve: |_| unreachable!("/loop is dispatched via the PROMPT_COMMANDS path in resolve()"),
+    },
+    BuiltinCommand {
+        name: "review",
+        description: "Multi-dimension code review of a target (verified findings)",
+        argument_hint: Some("[target: range | path | PR — default: working changes]"),
+        aliases: &[],
+        // Always-on: a single-agent review is useful even without the
+        // orchestrate fan-out tool, so this is never capability-gated.
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |_| {
+            unreachable!("/review is dispatched via the PROMPT_COMMANDS path in resolve()")
+        },
+    },
+    BuiltinCommand {
+        name: "security-review",
+        description: "Security audit of a target (ranked, verified vulnerabilities)",
+        argument_hint: Some("[target: range | path | PR — default: working changes]"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |_| {
+            unreachable!(
+                "/security-review is dispatched via the PROMPT_COMMANDS path in resolve()"
+            )
+        },
+    },
+];
 
 /// A slash command — either built-in or from a SKILL.md file.
 pub(super) enum SlashCommand<'a> {
@@ -981,6 +1007,8 @@ pub(super) fn resolve(
         // reusing /loop's prompt builder.
         let mut blocks = match prompt_cmd.name {
             "loop" => build_loop_prompt_blocks(args),
+            "review" => build_review_prompt_blocks(args),
+            "security-review" => build_security_review_prompt_blocks(args),
             other => {
                 unreachable!("prompt-only command /{other} has no resolver wired in resolve()")
             }
@@ -1091,6 +1119,25 @@ fn build_loop_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
     };
 
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
+}
+
+/// Build the `/review` prompt blocks. Empty args are valid (review the working
+/// changes), so — unlike `/loop` — there is no usage-only path here; the
+/// instruction itself resolves an empty target to the working diff.
+fn build_review_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
+    use xai_grok_tools::implementations::grok_build::review_instruction;
+    vec![acp::ContentBlock::Text(acp::TextContent::new(
+        review_instruction(args),
+    ))]
+}
+
+/// Build the `/security-review` prompt blocks. Empty args audit the working
+/// changes (see `build_review_prompt_blocks`).
+fn build_security_review_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
+    use xai_grok_tools::implementations::grok_build::security_review_instruction;
+    vec![acp::ContentBlock::Text(acp::TextContent::new(
+        security_review_instruction(args),
+    ))]
 }
 
 #[cfg(test)]
@@ -1424,6 +1471,75 @@ mod tests {
     }
 
     #[test]
+    fn resolve_review_expands_to_instruction_with_display_text() {
+        use xai_grok_tools::implementations::grok_build::review_instruction;
+        let outcome = resolve(
+            vec![text_block("/review main..HEAD")],
+            &[],
+            all_gated(),
+            SkillSlashRewrite::default(),
+        )
+        .unwrap_err();
+        let SlashCommandOutcome::InvokeSkill { blocks, skills } = outcome else {
+            panic!("expected InvokeSkill for /review");
+        };
+        assert!(skills.is_empty(), "/review is a prompt-only command");
+        let acp::ContentBlock::Text(tb) = blocks.first().expect("one block") else {
+            panic!("expected a text block");
+        };
+        // Wire text is the full expanded instruction…
+        assert_eq!(tb.text, review_instruction("main..HEAD"));
+        // …and the compact invocation renders in the UI / replay.
+        assert_eq!(
+            tb.meta
+                .as_ref()
+                .and_then(|m| m.get("displayText"))
+                .and_then(|v| v.as_str()),
+            Some("/review main..HEAD")
+        );
+    }
+
+    #[test]
+    fn resolve_security_review_bare_uses_command_display_text() {
+        use xai_grok_tools::implementations::grok_build::security_review_instruction;
+        // No args: still valid (audit the working changes), and the display
+        // text is the bare command.
+        let outcome = resolve(
+            vec![text_block("/security-review")],
+            &[],
+            all_gated(),
+            SkillSlashRewrite::default(),
+        )
+        .unwrap_err();
+        let SlashCommandOutcome::InvokeSkill { blocks, .. } = outcome else {
+            panic!("expected InvokeSkill for /security-review");
+        };
+        let acp::ContentBlock::Text(tb) = blocks.first().expect("one block") else {
+            panic!("expected a text block");
+        };
+        assert_eq!(tb.text, security_review_instruction(""));
+        assert_eq!(
+            tb.meta
+                .as_ref()
+                .and_then(|m| m.get("displayText"))
+                .and_then(|v| v.as_str()),
+            Some("/security-review")
+        );
+    }
+
+    /// Review workflows are always-on: advertised even when every gated
+    /// capability is off (only `AlwaysOn` builtins survive `default()`).
+    #[test]
+    fn review_commands_are_always_advertised() {
+        let names = advertised_names(CommandAvailability::default());
+        assert!(names.iter().any(|n| n == "review"), "got: {names:?}");
+        assert!(
+            names.iter().any(|n| n == "security-review"),
+            "got: {names:?}"
+        );
+    }
+
+    #[test]
     fn resolve_passthrough_preserves_original_blocks() {
         // External-harness agents: blocks are passed through verbatim.
         // The prompt assembly layer decides how to format them.
@@ -1525,6 +1641,8 @@ mod tests {
                 "feedback",
                 "goal",
                 "loop",
+                "review",
+                "security-review",
                 "commit",
                 "deploy",
             ]
@@ -2341,11 +2459,15 @@ mod tests {
 
     #[test]
     fn parse_skill_refs_multi_skill() {
-        let skills = vec![make_skill("review", true), make_skill("lint", true)];
-        let refs = parse_skill_references("/review fix auth /lint --strict", &skills, all_gated())
-            .unwrap();
+        // Note: skill names here must not collide with a builtin — `/review`
+        // and `/security-review` are now builtins and would be shadowed (see
+        // `review_commands_are_always_advertised`). "refactor" is skill-only.
+        let skills = vec![make_skill("refactor", true), make_skill("lint", true)];
+        let refs =
+            parse_skill_references("/refactor fix auth /lint --strict", &skills, all_gated())
+                .unwrap();
         assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].name, "review");
+        assert_eq!(refs[0].name, "refactor");
         assert_eq!(refs[0].args, "fix auth");
         assert_eq!(refs[1].name, "lint");
         assert_eq!(refs[1].args, "--strict");

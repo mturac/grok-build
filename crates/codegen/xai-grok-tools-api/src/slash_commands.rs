@@ -129,6 +129,160 @@ After assembly, mention the final output path.
 - **Real people:** reference-first — drive the video from a verified reference image; never animate a named person without one.
 - Don't loop the same clip unless asked.";
 
+// ── /review and /security-review ────────────────────────────────
+
+/// Advertised name of the /review command.
+pub const REVIEW_COMMAND_NAME: &str = "review";
+
+/// Advertised name of the /security-review command.
+pub const SECURITY_REVIEW_COMMAND_NAME: &str = "security-review";
+
+/// Usage hint shown when `/review` is invoked with no arguments.
+pub fn review_usage_message() -> &'static str {
+    "Usage: /review [target]\n\
+     Examples:\n\
+     /review                 review the uncommitted + staged changes\n\
+     /review main..HEAD      review a commit range\n\
+     /review src/auth.rs     review a path\n\n\
+     Runs a multi-dimension code review and reports ranked, verified findings. \
+     Does not change code."
+}
+
+/// Shared scope paragraph for the review workflows: how to resolve `target`
+/// into a concrete diff without guessing.
+const REVIEW_SCOPE: &str = "\
+## Scope\n\
+The target below says WHAT to review. Resolve it into a concrete change set:\n\
+- empty → the working changes: `git diff HEAD` (unstaged + staged). If that is \
+empty, say so and stop.\n\
+- a commit range (`main..HEAD`, `abc123..def456`) → `git diff <range>`.\n\
+- a path or glob → review that path's current contents (and its diff if it has \
+uncommitted changes).\n\
+- a PR number / URL → fetch the PR diff (e.g. `gh pr diff <n>`); if unavailable, \
+say so and ask.\n\
+Read enough surrounding code to judge each change in context — a diff alone \
+hides callers, invariants, and error paths.";
+
+/// Shared verify+report+boundaries footer for the review workflows.
+const REVIEW_CONTRACT: &str = "\
+## Verify before reporting\n\
+Every candidate finding must be checked against the actual code before it \
+reaches the report. State a concrete failure path (inputs/state → wrong \
+outcome); if you cannot, drop it. Prefer a short, high-signal list over a long \
+speculative one — a false positive costs the reader more than a missed nitpick.\n\n\
+## Report\n\
+Rank findings most-severe first. For each: a one-line summary, the exact \
+`file:line`, the concrete failure scenario, and a suggested fix. If nothing \
+substantive turns up, say so plainly rather than padding.\n\n\
+## Boundaries\n\
+Review only — do NOT edit, stage, commit, push, or merge anything. If the user \
+wants fixes, they will ask in a follow-up.";
+
+/// Build the model instruction that `/review` expands into for `args`.
+///
+/// Drives a multi-dimension review that fans out with the `orchestrate` tool
+/// when it is available and falls back to a direct review otherwise. The
+/// wording lives here so every front-end expands `/review` identically.
+pub fn review_instruction(args: &str) -> String {
+    let target = args.trim();
+    let target_line = if target.is_empty() {
+        "(none given — review the working changes)".to_string()
+    } else {
+        target.to_string()
+    };
+    format!(
+        "# /review -- multi-dimension code review\n\n\
+         Review the target below and report ranked, verified findings.\n\n\
+         {REVIEW_SCOPE}\n\n\
+         ## Dimensions\n\
+         Cover these lenses; each is a distinct failure mode, not a restatement:\n\
+         - Correctness — logic errors, off-by-one, wrong conditionals, unhandled \
+         cases, race conditions, resource leaks.\n\
+         - Error handling — swallowed errors, panics/unwraps on untrusted input, \
+         missing validation at boundaries.\n\
+         - Tests — missing coverage for new/changed behavior, tests that assert \
+         nothing, happy-path-only suites.\n\
+         - Security — injection, authz gaps, secret exposure (see /security-review \
+         for a dedicated pass).\n\
+         - Maintainability — duplicated logic, dead code, misleading names, \
+         needless complexity.\n\n\
+         ## Method\n\
+         If the `orchestrate` tool is available, fan out one reviewer per \
+         dimension in parallel, then adversarially verify each returned finding \
+         with a skeptical second pass before accepting it. If it is not \
+         available, do the same passes yourself, sequentially. Either way, the \
+         verify step is mandatory.\n\n\
+         {REVIEW_CONTRACT}\n\n\
+         ## Target\n\
+         {target_line}"
+    )
+}
+
+/// Usage hint shown when `/security-review` is invoked with no arguments.
+pub fn security_review_usage_message() -> &'static str {
+    "Usage: /security-review [target]\n\
+     Examples:\n\
+     /security-review              audit the uncommitted + staged changes\n\
+     /security-review main..HEAD   audit a commit range\n\
+     /security-review src/api      audit a path\n\n\
+     Runs a security-focused audit and reports ranked, verified \
+     vulnerabilities. Does not change code."
+}
+
+/// Build the model instruction that `/security-review` expands into for `args`.
+///
+/// A security-focused variant of [`review_instruction`] with an
+/// exploit-oriented rubric and severity ratings.
+pub fn security_review_instruction(args: &str) -> String {
+    let target = args.trim();
+    let target_line = if target.is_empty() {
+        "(none given — audit the working changes)".to_string()
+    } else {
+        target.to_string()
+    };
+    format!(
+        "# /security-review -- security audit\n\n\
+         Audit the target below for security vulnerabilities and report ranked, \
+         verified findings. Think like an attacker: assume all external input is \
+         hostile.\n\n\
+         {REVIEW_SCOPE}\n\n\
+         ## Threat lenses\n\
+         - Injection — SQL/NoSQL, OS command, path traversal, template, log \
+         injection.\n\
+         - AuthN/AuthZ — missing or bypassable authentication; authorization not \
+         enforced at the resource level; trusting client-supplied identity.\n\
+         - Secrets — hardcoded credentials/keys/tokens; secrets in logs, errors, \
+         or responses.\n\
+         - Input validation — unvalidated size/type/range; SSRF; unsafe \
+         deserialization; XXE.\n\
+         - Web — XSS (stored/reflected/DOM), CSRF, open redirect, insecure CORS, \
+         missing security headers.\n\
+         - Crypto — weak or home-rolled algorithms, static IVs/salts, predictable \
+         randomness, missing verification.\n\
+         - Memory/runtime (esp. Rust) — `unsafe` blocks, integer overflow, \
+         panics reachable from untrusted input (DoS), TOCTOU.\n\
+         - Supply chain — unpinned or abandoned dependencies, known-vulnerable \
+         versions.\n\n\
+         ## Method\n\
+         If the `orchestrate` tool is available, fan out the lenses in parallel, \
+         then adversarially verify each candidate — construct the concrete \
+         exploit path — before accepting it. If it is not available, do the same \
+         passes yourself. The verify step is mandatory: a security false positive \
+         erodes trust in the whole report.\n\n\
+         ## Report\n\
+         Rank by severity (Critical / High / Medium / Low). For each: a one-line \
+         summary, the exact `file:line`, a concrete exploit scenario (how an \
+         attacker reaches and abuses it), and a specific remediation. If the code \
+         is clean for a lens, say so briefly.\n\n\
+         ## Boundaries\n\
+         Audit only — do NOT edit, stage, commit, push, or merge anything. Do not \
+         run exploit code against live systems. If the user wants fixes, they will \
+         ask in a follow-up.\n\n\
+         ## Target\n\
+         {target_line}"
+    )
+}
+
 pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
 
 pub const GOAL_COMMAND_NAME: &str = "goal";
@@ -213,5 +367,47 @@ mod tests {
     fn usage_message_has_no_default_claim() {
         assert!(loop_usage_message().contains("Usage: /loop"));
         assert!(!loop_usage_message().contains("10m"));
+    }
+
+    #[test]
+    fn review_instruction_carries_target_and_contract_tokens() {
+        let text = review_instruction("main..HEAD");
+        assert!(text.contains("main..HEAD"), "target must appear: {text}");
+        // Uses orchestrate opportunistically, not as a hard requirement.
+        assert!(text.contains("orchestrate"));
+        assert!(text.contains("If it is not available"));
+        // Verify step and read-only boundary are the load-bearing contract.
+        assert!(text.contains("Verify before reporting"));
+        assert!(text.contains("do NOT edit, stage, commit, push, or merge"));
+        // Rides as a user message; must not claim system-reminder authority.
+        assert!(!text.contains("system-reminder"));
+    }
+
+    #[test]
+    fn review_instruction_empty_target_reviews_working_changes() {
+        let text = review_instruction("   ");
+        assert!(text.contains("review the working changes"));
+        assert!(review_usage_message().contains("Usage: /review"));
+    }
+
+    #[test]
+    fn security_review_instruction_carries_target_and_rubric() {
+        let text = security_review_instruction("src/api");
+        assert!(text.contains("src/api"), "target must appear: {text}");
+        assert!(text.contains("Injection"));
+        assert!(text.contains("exploit scenario"));
+        // Severity ladder present.
+        assert!(text.contains("Critical / High / Medium / Low"));
+        // Read-only + no live exploitation.
+        assert!(text.contains("do NOT edit, stage, commit, push, or merge"));
+        assert!(text.contains("Do not run exploit code"));
+        assert!(!text.contains("system-reminder"));
+    }
+
+    #[test]
+    fn security_review_empty_target_audits_working_changes() {
+        let text = security_review_instruction("");
+        assert!(text.contains("audit the working changes"));
+        assert!(security_review_usage_message().contains("Usage: /security-review"));
     }
 }

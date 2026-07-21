@@ -69,3 +69,27 @@ pub use video_gen::{
 };
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use web_search::WebSearchTool;
+
+// Curated review workflows (`/review`, `/security-review`). Wording lives in
+// the shared `slash_commands` module so every front-end expands identically,
+// re-exported here alongside `loop_*` so shell/pager import from one path.
+pub use xai_grok_tools_api::slash_commands::{
+    REVIEW_COMMAND_NAME, SECURITY_REVIEW_COMMAND_NAME, review_instruction, review_usage_message,
+    security_review_instruction, security_review_usage_message,
+};
+
+#[cfg(test)]
+mod review_command_drift_tests {
+    use super::orchestrate::ORCHESTRATE_TOOL_NAME;
+    use super::{review_instruction, security_review_instruction};
+
+    /// The review workflows name the orchestrate tool in prose. Pin that prose
+    /// to the real advertised tool name so a rename of the tool surfaces here
+    /// instead of leaving the instruction pointing at a tool that no longer
+    /// exists.
+    #[test]
+    fn review_prose_matches_real_orchestrate_tool_name() {
+        assert!(review_instruction("x").contains(ORCHESTRATE_TOOL_NAME));
+        assert!(security_review_instruction("x").contains(ORCHESTRATE_TOOL_NAME));
+    }
+}

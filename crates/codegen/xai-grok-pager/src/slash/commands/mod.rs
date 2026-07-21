@@ -35,6 +35,7 @@ pub mod jump;
 pub mod login;
 pub mod logout;
 pub mod loop_cmd;
+pub mod review_cmd;
 pub mod mcps;
 pub mod model;
 pub mod multiline;
@@ -121,6 +122,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(terminal_setup::TerminalSetupCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
+        Arc::new(review_cmd::ReviewCommand),
+        Arc::new(review_cmd::SecurityReviewCommand),
         Arc::new(imagine::ImagineCommand),
         Arc::new(imagine_video::ImagineVideoCommand),
         Arc::new(timestamps::TimestampsCommand),
