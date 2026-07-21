@@ -695,6 +695,7 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::SchedulerListTool>();
         b.register::<grok_build::CiGuardTool>();
         b.register::<grok_build::OrchestrateTool>();
+        b.register::<grok_build::ArtifactTool>();
         b.register::<codex::apply_patch::ApplyPatchTool>();
         b.register::<codex::list_dir::CodexListDirTool>();
         b.register::<codex::grep_files::CodexGrepFilesTool>();

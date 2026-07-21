@@ -616,6 +616,18 @@ pub async fn run_agent_server_on(
         crate::agent::notify::FanoutNotifier::new(vec![web_push]),
     ));
 
+    // Publish the process-wide artifact service so the `artifact` tool can
+    // store documents under grok-home and hand back links on this server's
+    // origin, served by the `/artifacts` routes below.
+    {
+        use xai_grok_tools::implementations::grok_build::{
+            ArtifactService, ArtifactStore, set_artifact_service,
+        };
+        let store = ArtifactStore::load(&grok_home);
+        let base_url = format!("http://{}:{}", bind_addr.ip(), bind_addr.port());
+        set_artifact_service(std::sync::Arc::new(ArtifactService::new(store, base_url)));
+    }
+
     let state = Arc::new(ServerState {
         agent_config,
         secret,
@@ -636,6 +648,12 @@ pub async fn run_agent_server_on(
         .route("/manifest.webmanifest", get(webui::manifest))
         .route("/sw.js", get(webui::service_worker))
         .route("/icon.svg", get(webui::icon_svg))
+        // Artifact viewing: an index of published artifacts and each artifact's
+        // page. Read-only, no secret (the pages carry no secrets), and every
+        // artifact response ships a strict CSP so a page cannot call back to
+        // `/ws` or exfiltrate the server secret. See the `artifact` module.
+        .route("/artifacts", get(artifacts_index))
+        .route("/artifacts/{id}", get(artifact_view))
         // Web Push subscription management. Unlike the static PWA shell routes
         // above, these carry data and are secret-gated exactly like `/ws`.
         .route("/push/vapid-public-key", get(push_vapid_public_key))
@@ -662,6 +680,47 @@ pub async fn run_agent_server_on(
     .await?;
 
     Ok(())
+}
+
+/// GET `/artifacts` — index of published artifacts.
+async fn artifacts_index() -> Response {
+    use xai_grok_tools::implementations::grok_build::{artifact::render, artifact_service};
+    let Some(svc) = artifact_service() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "artifacts unavailable").into_response();
+    };
+    html_response(render::render_index(&svc.store.list()))
+}
+
+/// GET `/artifacts/{id}` — render one published artifact under a strict CSP.
+async fn artifact_view(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    use xai_grok_tools::implementations::grok_build::{artifact::render, artifact_service};
+    let Some(svc) = artifact_service() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "artifacts unavailable").into_response();
+    };
+    match svc.store.get(&id) {
+        Some(artifact) => html_response(render::render(&artifact)),
+        None => (StatusCode::NOT_FOUND, "artifact not found").into_response(),
+    }
+}
+
+/// Build a `text/html` response carrying the strict artifact CSP so a served
+/// page cannot reach the network (no callback to `/ws`, no secret exfiltration).
+fn html_response(body: String) -> Response {
+    use axum::http::header::{
+        CONTENT_SECURITY_POLICY, CONTENT_TYPE, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
+    };
+    use xai_grok_tools::implementations::grok_build::artifact::render::ARTIFACT_CSP;
+    axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(CONTENT_SECURITY_POLICY, ARTIFACT_CSP)
+        // Defense in depth alongside the CSP sandbox: don't let the browser
+        // sniff a different type, and don't leak the artifact URL as a referrer.
+        .header(X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(REFERRER_POLICY, "no-referrer")
+        .body(axum::body::Body::from(body))
+        .expect("valid artifact response")
+        .into_response()
 }
 
 #[cfg(test)]
