@@ -403,6 +403,26 @@ fn annotations(bash: &BashOutput) -> String {
     s
 }
 
+mod salvage;
+
+/// Max bytes read back from a truncated command's output file when salvaging
+/// error lines — a build/test log is well under this; caps a pathological file.
+/// For a file larger than this the salvaged `L<n>` numbers are relative to the
+/// scanned prefix, not the full file (an accepted edge for a pathological log).
+const MAX_SALVAGE_SCAN_BYTES: usize = 4 * 1024 * 1024;
+/// Caps on the salvaged block appended to a truncated prompt.
+const SALVAGE_MAX_LINES: usize = 20;
+const SALVAGE_MAX_CHARS: usize = 1500;
+
+/// Read at most `cap` bytes of `path` (lossy UTF-8). `None` on any IO error.
+fn read_capped(path: &str, cap: usize) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(cap as u64).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Build the full DEFAULT prompt text from a `BashOutput`.
 ///
 /// - Normal: `exit: N [annotations]\n<stripped_output>`
@@ -438,7 +458,22 @@ pub(crate) fn format_default_prompt(bash: &BashOutput) -> String {
             Some(reason) => format!("exit: killed ({}){}", reason, annotations(bash)),
             None => format!("exit: {}{}", bash.exit_code, annotations(bash)),
         };
-        format!("{}\n{}", header, output_str)
+        let mut body = format!("{}\n{}", header, output_str);
+        // When output was truncated (head/tail kept, middle dropped to the
+        // output file), surface any error/failure lines from the elided middle
+        // that the model can't otherwise see — a mid-log build/test failure is
+        // easily missed by head+tail alone. Best-effort: skip silently on any
+        // read/decoding issue.
+        if bash.truncated
+            && !bash.output_file.is_empty()
+            && let Some(full) = read_capped(&bash.output_file, MAX_SALVAGE_SCAN_BYTES)
+            && let Some(block) =
+                salvage::salvage_error_lines(&full, &output_str, SALVAGE_MAX_LINES, SALVAGE_MAX_CHARS)
+        {
+            body.push('\n');
+            body.push_str(&block);
+        }
+        body
     }
 }
 
@@ -3316,6 +3351,54 @@ mod tests {
         };
         bash.output_for_prompt = format_default_prompt(&bash);
         bash
+    }
+
+    #[test]
+    fn format_default_prompt_salvages_error_from_truncated_output_file() {
+        use std::io::Write;
+        // Full output with the failure in the MIDDLE; the shown head/tail omits
+        // it. The salvage must read the file and surface the error line.
+        let full = format!(
+            "start ok\n{}ERROR: middle boom\n{}end ok\n",
+            "filler line\n".repeat(3),
+            "filler line\n".repeat(3),
+        );
+        let mut tf = tempfile::NamedTempFile::new().unwrap();
+        tf.write_all(full.as_bytes()).unwrap();
+
+        let shown = "start ok\nend ok"; // head/tail only
+        let bash = BashOutput {
+            output: shown.as_bytes().to_vec(),
+            output_for_prompt: BashOutput::make_output_for_prompt(shown),
+            exit_code: 1,
+            command: "build".to_string(),
+            truncated: true,
+            signal: None,
+            timed_out: false,
+            description: None,
+            current_dir: "/tmp".to_string(),
+            output_file: tf.path().to_string_lossy().to_string(),
+            total_bytes: full.len(),
+            output_delta: None,
+            was_bare_echo: false,
+        };
+        let prompt = format_default_prompt(&bash);
+        assert!(
+            prompt.contains("[key lines from elided output]"),
+            "salvage block missing: {prompt}"
+        );
+        assert!(
+            prompt.contains("ERROR: middle boom"),
+            "middle error not salvaged: {prompt}"
+        );
+    }
+
+    #[test]
+    fn format_default_prompt_no_salvage_when_not_truncated() {
+        // Not truncated → never read a file, never append a salvage block.
+        let bash = make_bash_output(0, "all good\nno errors here\n");
+        let prompt = format_default_prompt(&bash);
+        assert!(!prompt.contains("[key lines from elided output]"), "got: {prompt}");
     }
 
     #[test]
