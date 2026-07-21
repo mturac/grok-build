@@ -649,6 +649,7 @@ pub enum ToolOutput {
     CiGuard(crate::implementations::grok_build::ci_guard::tool::CiGuardOutput),
     Orchestrate(crate::implementations::grok_build::orchestrate::types::OrchestrateOutput),
     Artifact(crate::implementations::grok_build::artifact::types::ArtifactOutput),
+    CodeContext(crate::implementations::grok_build::code_context::types::CodeContextOutput),
     UpdateGoal(crate::implementations::grok_build::update_goal::UpdateGoalOutput),
     /// Dynamic output for runtime-registered tools (MCP, test tools, etc.)
     Dynamic(DynamicOutput),
@@ -980,6 +981,7 @@ impl ToolOutput {
             ToolOutput::UpdateGoal(o) => o.summary.clone(),
             ToolOutput::Orchestrate(o) => o.result.clone(),
             ToolOutput::Artifact(o) => o.message.clone(),
+            ToolOutput::CodeContext(o) => o.result.clone(),
             ToolOutput::CiGuard(o) => {
                 // Include the structured data (headSha/logsTail/failingTests) so
                 // the agent has what it needs to produce a fix and call commit_fix.

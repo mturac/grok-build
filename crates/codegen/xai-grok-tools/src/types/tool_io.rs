@@ -97,6 +97,7 @@ pub enum ToolInput {
     CiGuard(crate::implementations::grok_build::ci_guard::tool::CiGuardInput),
     Orchestrate(crate::implementations::grok_build::orchestrate::types::OrchestrateInput),
     Artifact(crate::implementations::grok_build::artifact::types::ArtifactInput),
+    CodeContext(crate::implementations::grok_build::code_context::types::CodeContextInput),
     UpdateGoal(UpdateGoalInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),

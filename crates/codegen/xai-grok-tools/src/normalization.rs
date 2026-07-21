@@ -130,6 +130,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::CiGuard(_)
         | ToolInput::Orchestrate(_)
         | ToolInput::Artifact(_)
+        | ToolInput::CodeContext(_)
         | ToolInput::UpdateGoal(_)
         | ToolInput::Dynamic(_) => return None,
     })
