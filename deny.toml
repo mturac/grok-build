@@ -1,0 +1,69 @@
+# cargo-deny configuration — supply-chain policy for the fork.
+#
+# Ported as a *practice* (not code) from earendil-works/pi's supply-chain
+# hardening: treat dependency changes as reviewed code. Enforced in CI by
+# .github/workflows/supply-chain.yml (advisories/bans/sources block; licenses
+# is informational until the allow-list is validated against the full tree).
+#
+# Run locally:  cargo deny check
+# Schema: cargo-deny v2 (see https://embarkstudios.github.io/cargo-deny/).
+
+[graph]
+# Evaluate the default feature set; matches how the workspace builds.
+all-features = false
+
+# ── Security advisories (RustSec) ──────────────────────────────────────────
+[advisories]
+version = 2
+# Fail on a dependency the registry has yanked.
+yanked = "deny"
+# Advisory IDs consciously accepted go here, each with a justifying comment,
+# e.g. "RUSTSEC-2024-XXXX", # unmaintained transitive dep, no fix, low risk.
+ignore = []
+
+# ── Licenses ───────────────────────────────────────────────────────────────
+# Permissive licenses common in the Rust ecosystem. This list is enforced by
+# the *informational* `check licenses` CI step first; promote it to a blocking
+# gate once it is confirmed to pass against the full dependency tree.
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OpenSSL",
+]
+# Per-crate license exceptions (crate + its SPDX id) go here when a dependency
+# ships an otherwise-unlisted but acceptable license.
+exceptions = []
+
+# ── Duplicate / banned crates ───────────────────────────────────────────────
+[bans]
+# Duplicate versions are a warning (large workspaces routinely have a few);
+# tighten to "deny" once the tree is deduplicated.
+multiple-versions = "warn"
+# A `*` version requirement is a supply-chain smell.
+wildcards = "warn"
+# Crates that must never appear go here, e.g. { name = "openssl-sys" }.
+deny = []
+
+# ── Source registries ───────────────────────────────────────────────────────
+[sources]
+# Only crates.io and explicitly-allowed git remotes are permitted; anything
+# else (a private registry, an unpinned git URL) fails.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    # First-party/vendored git dependency pinned by rev in the root Cargo.toml.
+    "https://github.com/helix-editor/nucleo.git",
+]
