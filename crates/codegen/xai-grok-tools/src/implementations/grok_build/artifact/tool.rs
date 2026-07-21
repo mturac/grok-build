@@ -90,7 +90,7 @@ impl crate::types::tool_metadata::ToolMetadata for ArtifactTool {
 - `content`: the body. With `format: "markdown"` (default) it is rendered to a styled page; with `format: "html"` you provide a complete, self-contained HTML document.
 - `id` (optional): pass a previous artifact's id to update it in place and keep the same URL; omit to publish a new one.
 
-The document must be self-contained and STATIC. A strict, sandboxed Content-Security-Policy blocks all external requests AND all JavaScript (no CDNs, fonts, network calls, or scripts); use only HTML and inline CSS, and embed images as data: URIs. Do not include `<script>` — it will not run. Requires a running `grok agent serve`. Use this when the user would be better served by a viewable page than by terminal text."#
+The document must be fully self-contained. A strict, sandboxed Content-Security-Policy blocks all external and network requests, so inline everything: CSS in `<style>`, JavaScript in `<script>` (inline only — no external src, and no fetch/XHR/WebSocket at runtime), any data as JS literals, and images as data: URIs. Interactive inline JS is supported (charts, toggles, filtering over inlined data); the page is isolated from the app's storage and the network. Requires a running `grok agent serve`. Use this when the user would be better served by a viewable page than by terminal text."#
     }
     fn emitted_notifications(&self) -> &'static [&'static str] {
         &[]

@@ -16,29 +16,34 @@ use super::types::ArtifactFormat;
 /// in that origin's storage), so an artifact — potentially produced via prompt
 /// injection — must not be able to read that storage or exfiltrate it.
 ///
-/// Two layers close that hole:
-/// - `sandbox` with no allow-tokens forces the document into a unique opaque
-///   origin, so it cannot touch the real origin's `localStorage`/cookies, and
-///   blocks scripts, forms, popups, and top-level navigation (the escape hatch
-///   `connect-src` alone does not cover).
-/// - `script-src 'none'` and `connect-src 'none'` are belt-and-suspenders: no
-///   script runs and no network egress is possible even if a UA mis-handles
-///   the sandbox.
+/// The isolation that makes interactive JS safe here:
+/// - `sandbox allow-scripts` (crucially WITHOUT `allow-same-origin`) runs the
+///   document in a unique OPAQUE origin. Inline scripts execute, but the page
+///   cannot read the real origin's `localStorage`/cookies (opaque origin access
+///   throws), so it cannot reach the PWA's stored server secret. No
+///   `allow-top-navigation`/`allow-popups`/`allow-forms` tokens, so a script
+///   also cannot navigate the tab to an attacker URL or submit a form.
+/// - `connect-src 'none'` blocks every network egress (fetch/XHR/WebSocket/
+///   beacon), so even executing script cannot phone home.
+/// - `script-src 'unsafe-inline'` allows the artifact's own inline `<script>`
+///   but no external script src (no host source), keeping artifacts
+///   self-contained.
 ///
-/// Consequence: artifacts are STATIC (HTML + inline CSS + `data:` images). This
-/// covers reports, tables, and summaries; interactive JS is intentionally not
-/// supported (it would require a separate sandbox origin, as Claude does).
+/// Net: artifacts may run interactive inline JavaScript against inlined data,
+/// but are isolated from the PWA's storage and from the network. Data and any
+/// libraries must be inlined — there is no live fetch (as with Claude's
+/// artifacts).
 pub const ARTIFACT_CSP: &str = "default-src 'none'; \
 img-src 'self' data:; \
 style-src 'unsafe-inline'; \
 font-src data:; \
-script-src 'none'; \
+script-src 'unsafe-inline'; \
 connect-src 'none'; \
 frame-src 'none'; \
 object-src 'none'; \
 base-uri 'none'; \
 form-action 'none'; \
-sandbox";
+sandbox allow-scripts";
 
 /// Escape the five XML/HTML special characters for safe insertion into text
 /// and double-quoted attribute contexts.
@@ -208,16 +213,18 @@ mod tests {
 
     #[test]
     fn csp_isolates_and_blocks_egress() {
-        // Same-origin isolation + no-script + no-network are the properties the
-        // artifact sandbox depends on. Loss of any of them is a secret-exfil path.
+        // Interactive JS is allowed, but the two properties that keep it safe
+        // must hold: opaque-origin isolation (so no access to the PWA's stored
+        // secret) and no network egress. Losing either is a secret-exfil path.
         assert!(ARTIFACT_CSP.contains("default-src 'none'"));
         assert!(ARTIFACT_CSP.contains("connect-src 'none'"));
-        assert!(ARTIFACT_CSP.contains("script-src 'none'"));
-        // `sandbox` with NO allow-tokens → opaque origin (no localStorage/cookie
-        // access), no scripts, no forms, no popups, no top-navigation.
-        assert!(ARTIFACT_CSP.trim_end().ends_with("sandbox"));
+        // Sandboxed with scripts allowed but NEVER same-origin (that would
+        // re-grant access to the real origin's storage) and no
+        // top-navigation/popups/forms (no other allow-tokens).
+        assert!(ARTIFACT_CSP.trim_end().ends_with("sandbox allow-scripts"));
         assert!(!ARTIFACT_CSP.contains("allow-same-origin"));
-        // Scripts must not be inline-allowed (that was the exfil path).
-        assert!(!ARTIFACT_CSP.contains("script-src 'unsafe-inline'"));
+        assert!(!ARTIFACT_CSP.contains("allow-top-navigation"));
+        assert!(!ARTIFACT_CSP.contains("allow-popups"));
+        assert!(!ARTIFACT_CSP.contains("allow-forms"));
     }
 }
