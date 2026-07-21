@@ -1037,6 +1037,15 @@ fn build_spawn_system_prompt(
             prompt.push_str(rules);
             prompt.push_str("\n</human_rules>");
         }
+        // Optional output style (persona/verbosity), same meta channel as rules:
+        // a built-in name (concise/explanatory/review/default) or a custom
+        // directive used verbatim. `default`/empty add nothing.
+        if let Some(style) =
+            read_session_or_init_meta_str(session_meta, init_meta, "output_style")
+            && let Some(block) = crate::agent::output_style::render_output_style_block(style)
+        {
+            prompt.push_str(&block);
+        }
         prompt
     }
 }

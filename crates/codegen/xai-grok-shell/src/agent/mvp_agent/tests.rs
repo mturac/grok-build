@@ -942,6 +942,27 @@ fn system_prompt_override_from_meta_prefers_session_and_rejects_empty() {
     assert_eq!(system_prompt_override_from_meta(None, None), None);
 }
 #[test]
+fn build_spawn_system_prompt_appends_output_style() {
+    let base = "BASE PROMPT";
+    // A built-in style name is folded in as an <output_style> block.
+    let meta = serde_json::json!({ "output_style": "concise" });
+    let out = build_spawn_system_prompt(meta.as_object(), None, base);
+    assert!(out.starts_with("BASE PROMPT"));
+    assert!(out.contains("<output_style>"));
+    assert!(out.contains("Respond concisely"));
+
+    // No style / the `default` built-in add nothing.
+    assert_eq!(build_spawn_system_prompt(None, None, base), "BASE PROMPT");
+    let def = serde_json::json!({ "output_style": "default" });
+    assert!(!build_spawn_system_prompt(def.as_object(), None, base).contains("<output_style>"));
+
+    // A custom (non-builtin) value is used verbatim.
+    let custom = serde_json::json!({ "output_style": "Answer only in haiku." });
+    assert!(
+        build_spawn_system_prompt(custom.as_object(), None, base).contains("Answer only in haiku.")
+    );
+}
+#[test]
 fn enqueue_replace_system_prompt_override_sends_when_present() {
     use crate::session::SessionCommand;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
