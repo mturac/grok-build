@@ -12,6 +12,7 @@ pub mod artifact;
 pub mod ask_user_question;
 pub mod bash;
 pub mod ci_guard;
+pub mod code_context;
 pub mod orchestrate;
 #[path = "deploy_app_stub.rs"]
 pub mod deploy_app;
@@ -41,6 +42,7 @@ pub use artifact::{
 };
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
+pub use code_context::{CODE_CONTEXT_TOOL_NAME, CodeContextTool};
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
