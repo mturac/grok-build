@@ -66,6 +66,15 @@ WebSocket server and the sub-agent runtime — details in the
   sub-agents in parallel in one call, wait for all of them, then synthesize the
   results — or run each through an independent verifier and keep only the
   confirmed ones.
+- **Curated review workflows (`/review`, `/security-review`).** One command runs
+  a multi-dimension code review (or an exploit-oriented security audit) of a
+  target — the working changes by default, or a commit range, path, or PR. It
+  fans out across review lenses with `orchestrate` when available, always
+  adversarially verifies each finding before reporting, and stays strictly
+  read-only: it **never edits, commits, pushes, or merges**.
+- **Output styles.** Select a response persona/verbosity that is folded into the
+  agent's system prompt for the session — built-in `concise`, `explanatory`, and
+  `review` styles, or your own custom persona used verbatim.
 
 > These features live in this fork; the rest of the tree is synced from the
 > upstream SpaceXAI monorepo as described above.
