@@ -1,0 +1,53 @@
+name: supply-chain
+
+# Supply-chain hardening (ported as a practice from earendil-works/pi):
+# treat dependency changes as reviewed code. Policy lives in ../deny.toml.
+#
+# Posture: `bans`, `sources`, and lockfile freshness are BLOCKING gates that
+# pass today. `advisories` and `licenses` run informationally (the workspace
+# carries some pre-existing RustSec advisories); promote them to blocking once
+# those are triaged — fixed via `cargo update`, or accepted in deny.toml's
+# `[advisories] ignore` with a justification.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly sweep so a newly-published advisory against a pinned dep surfaces
+    # even without a code change.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deny:
+    name: cargo-deny + lockfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The committed Cargo.lock is the dependency ground truth: fail if a
+      # resolve would change it (a dep was added/bumped without committing).
+      - name: Lockfile is authoritative (--locked)
+        run: cargo metadata --locked --format-version=1 > /dev/null
+
+      # Blocking: only crates.io + allow-listed git sources, and no banned or
+      # wildcard-pinned crates. These pass on the current tree.
+      - name: cargo-deny (blocking — bans + sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans sources
+
+      # Informational: surface known vulnerabilities/unmaintained crates and
+      # any non-allow-listed licenses without failing the build yet.
+      - name: cargo-deny (informational — advisories + licenses)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        continue-on-error: true
+        with:
+          command: check advisories licenses
